@@ -25,6 +25,26 @@ import path from 'node:path'
 import { EventEmitter } from 'node:events'
 
 export const SOURCES = { claude: 'Claude Code', codex: 'Codex' }
+
+/**
+ * How to launch each CLI without a shell. A native `claude.exe` / `codex` on
+ * PATH runs as is; an npm shim (`*.cmd`, which only a shell can run) is
+ * replaced by node + the package's JS entry next to it.
+ */
+export function resolveBins({ env = process.env, platform = process.platform, exists = fs.existsSync } = {}) {
+  const dirs = String(env.PATH || env.Path || '').split(path.delimiter).filter(Boolean)
+  const pick = (name, pkgEntry) => {
+    for (const dir of dirs) {
+      if (platform === 'win32') {
+        if (exists(path.join(dir, name + '.exe'))) return [path.join(dir, name + '.exe')]
+        const js = path.join(dir, 'node_modules', ...pkgEntry)
+        if (exists(path.join(dir, name + '.cmd')) && exists(js)) return [process.execPath, js]
+      } else if (exists(path.join(dir, name))) return [path.join(dir, name)]
+    }
+    return null
+  }
+  return { claude: pick('claude', ['@anthropic-ai', 'claude-code', 'cli.js']), codex: pick('codex', ['@openai', 'codex', 'bin', 'codex.js']) }
+}
 export const MODES = ['auto', 'phone', 'pc']
 const DEFAULTS = { mode: 'auto', awayMs: 3 * 60 * 1000, holdMs: 20 * 60 * 1000 }
 const MAX_TIMELINE = 200
@@ -97,9 +117,10 @@ export class AgentHub extends EventEmitter {
   }
 
   /** Away from the PC right now? Unknown presence counts as "at the PC" in auto mode. */
-  away() {
+  away(s) {
     const { mode, awayMs } = this.settings
-    if (mode === 'phone') return true
+    // A turn started from the phone has nobody at the PC to answer its dialogs.
+    if (mode === 'phone' || (s && s.phoneTurn)) return true
     if (mode === 'pc') return false
     const p = this.presence.get()
     return Boolean(p && (p.locked || p.idleMs >= awayMs))
@@ -160,7 +181,7 @@ export class AgentHub extends EventEmitter {
         return this.permission(s, ev, signal)
       case 'Notification': {
         // A dialog we did not hold (user was at the PC, or mode pc) has now waited unanswered.
-        if (ev.notification_type === 'permission_prompt' && this.away()) {
+        if (ev.notification_type === 'permission_prompt' && this.away(s)) {
           this.notify.emit({ t: 'info', s: s.key, title: this.label(s), text: clip(ev.message || '在电脑上等你确认', 200) })
         }
         return {}
@@ -172,7 +193,7 @@ export class AgentHub extends EventEmitter {
         const text = typeof ev.last_assistant_message === 'string' ? ev.last_assistant_message : ''
         if (text) this.push(s, { k: 'a', text: clip(text, 20000) })
         this.push(s, { k: 'end', reason: 'completed', ms })
-        if (this.away()) this.notify.emit({ t: 'done', s: s.key, title: this.label(s), ms, preview: clip(text.replace(/\s+/g, ' '), 140) })
+        if (this.away(s)) this.notify.emit({ t: 'done', s: s.key, title: this.label(s), ms, preview: clip(text.replace(/\s+/g, ' '), 140) })
         this.emit('change')
         return {}
       }
@@ -189,7 +210,7 @@ export class AgentHub extends EventEmitter {
     const { what, detail } = describeTool(ev.tool_name, ev.tool_input)
     const row = { k: 't', id: 'p' + (s.seq + 1), name: ev.tool_name, kind: 'other', title: clip(what, 160), detail: clip(detail, 1500) }
     this.push(s, row)
-    if (!this.away()) { row.done = true; row.out = '在电脑上确认'; this.emit('change'); return {} }
+    if (!this.away(s)) { row.done = true; row.out = '在电脑上确认'; this.emit('change'); return {} }
     const id = crypto.randomUUID()
     const suggestions = Array.isArray(ev.permission_suggestions) ? ev.permission_suggestions : []
     const ask = { id, rpc: 'agent:' + id, s: s.key, src: s.src, tool: ev.tool_name, what: row.title, detail: row.detail, title: this.label(s), remember: s.src === 'claude' && suggestions.length > 0, at: this.now() }
@@ -244,6 +265,53 @@ export class AgentHub extends EventEmitter {
     this.emit('askDone', { id, s: p.ask.s, outcome })
     this.emit('change')
     p.resolve(answer)
+  }
+
+  /**
+   * Continue a session from the phone: `claude -p <text> --resume <id>` /
+   * `codex exec resume <id> <text>` in the session's folder. The session file
+   * grows as it runs (the phone view refreshes from it); its dialogs go to the
+   * phone; a failed run comes back as an error notice with the tool's own words.
+   * @param {{ key: string, src: string, sid: string, cwd: string }} target
+   * @param {(cmd: string, args: string[], opts: object) => import('node:child_process').ChildProcess} spawnImpl
+   */
+  prompt(target, text, { spawnImpl, bins = {} }) {
+    text = String(text || '').trim()
+    if (!text) throw Object.assign(new Error('消息是空的'), { status: 400, code: 'empty' })
+    if (!target.cwd) throw Object.assign(new Error('不知道这个会话的项目目录'), { status: 400, code: 'no-cwd' })
+    const s = this.session(target.src, { session_id: target.sid, cwd: target.cwd })
+    if (s.running) throw Object.assign(new Error('这个会话正在运行，等它结束再发'), { status: 409, code: 'busy' })
+    const args = target.src === 'claude'
+      ? ['-p', text, '--resume', target.sid, '--output-format', 'json']
+      : ['exec', 'resume', target.sid, text]
+    // bins[src] = [command, ...leading args]; never a shell: the text must not be parsed by cmd.exe.
+    const [cmd, ...pre] = bins[target.src] || [target.src === 'claude' ? 'claude' : 'codex']
+    const child = spawnImpl(cmd, [...pre, ...args], { cwd: target.cwd, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
+    s.running = true
+    s.phoneTurn = true
+    s.turnStart = this.now()
+    let out = ''
+    const keep = (d) => { out = (out + d).slice(-8000) }
+    if (child.stdout) child.stdout.on('data', keep)
+    if (child.stderr) child.stderr.on('data', keep)
+    const finish = (code) => {
+      if (!s.phoneTurn) return
+      s.phoneTurn = false
+      s.running = false
+      let msg = ''
+      if (target.src === 'claude') { try { const j = JSON.parse(out.slice(out.indexOf('{'))); if (j.is_error) msg = j.result || 'error' } catch {} }
+      if (code !== 0 && !msg) msg = out.trim().split('\n').slice(-3).join(' ') || `exit ${code}`
+      if (msg) {
+        this.notify.emit({ t: 'err', s: s.key, title: this.label(s), msg: clip(msg, 300) })
+        this.emit('fail', { s: s.key, msg: clip(msg, 300) })
+      }
+      this.emit('change')
+    }
+    child.on('exit', finish)
+    child.on('error', (err) => { out += String(err && err.message); finish(-1) })
+    this.push(s, { k: 'u', text: clip(text, 4000), phone: true })
+    this.emit('change')
+    return { started: true }
   }
 
   /** Pending approvals, as ask frames (phone reconnects get them again). */

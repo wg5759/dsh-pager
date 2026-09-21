@@ -21,8 +21,11 @@
  *                            same notices the Android app gets (see push.js)
  *   POST /m/api/agents/hook  Claude Code / Codex hook events (tools/pager-hook.mjs;
  *                            token from ~/.dsh-pager/hook.json; see agents.js)
- *   GET  /m/api/agents       their recent sessions, pending approvals, routing mode
- *   GET  /m/api/agents/history   one of their sessions as chat items
+ *   GET  /m/api/agents       their recent sessions (hooks + session files of the last
+ *                            7 days), pending approvals, routing mode
+ *   GET  /m/api/agents/history   one session as chat items, folded from its session
+ *                            file (transcripts.js), which is then watched for changes
+ *   POST /m/api/agents/prompt    continue a session from the phone {s, text}
  *   POST /m/api/agents/mode  auto | phone | pc
  *
  * This module talks to DSH only through its public loopback wire protocol
@@ -48,8 +51,10 @@ import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue, 
 import { NotifyHub } from './notify.js'
 import { confine, describe as describeFile, parseRange, MEDIA } from './files.js'
 import { WebPush, noticePayload, defaultDir } from './push.js'
-import { AgentHub } from './agents.js'
+import { spawn } from 'node:child_process'
+import { AgentHub, SOURCES, resolveBins } from './agents.js'
 import { createPresence } from './presence.js'
+import { foldFile, recentFiles } from './transcripts.js'
 
 const WWW = path.join(path.dirname(fileURLToPath(import.meta.url)), 'www')
 
@@ -188,6 +193,59 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     } catch (err) { log(`agents: cannot write hook.json: ${err.message}`) }
   }
   const hookTimer = setTimeout(writeHookConfig, 3000)
+
+  // Sessions found on disk (before the hooks were installed, or after a restart
+  // emptied the hub). Rescanned at most every 15 s; each file refolded only when it changed.
+  const diskMeta = new Map()
+  let diskList = null
+  const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || ''
+  function diskSessions() {
+    if (diskList && Date.now() - diskList.at < 15000) return diskList.v
+    const v = recentFiles({ days: 7, max: 30 }).map((f) => {
+      let m = diskMeta.get(f.file)
+      if (!m || m.size !== f.size || m.mtime !== f.at) {
+        m = { size: f.size, mtime: f.at, title: '', cwd: '' }
+        try { const x = foldFile(f.file, f.src, 256 * 1024); m.title = x.title; m.cwd = x.cwd } catch {}
+        diskMeta.set(f.file, m)
+      }
+      return { id: `agent:${f.src}:${f.id}`, src: f.src, sid: f.id, name: SOURCES[f.src], project: baseName(m.cwd), cwd: m.cwd, title: m.title, at: f.at, run: false, asks: 0, file: f.file }
+    })
+    diskList = { at: Date.now(), v }
+    return v
+  }
+  /** Everything known about one agent session: hub state first, disk as fallback. */
+  function agentInfo(key) {
+    const live = agents.get(key)
+    const disk = diskSessions().find((x) => x.id === key)
+    if (!live && !disk) return null
+    const [, src, sid] = /^agent:([a-z]+):(.+)$/.exec(key) || []
+    return { key, src, sid, cwd: (live && live.cwd) || (disk && disk.cwd) || '', file: (live && live.transcript) || (disk && disk.file) || '', title: (live && live.title) || (disk && disk.title) || '' }
+  }
+  function agentSessions() {
+    const live = agents.list()
+    const seen = new Set(live.map((x) => x.id))
+    return live.concat(diskSessions().filter((x) => !seen.has(x.id)).map(({ file, sid, ...x }) => x)).sort((a, b) => b.at - a.at).slice(0, 30)
+  }
+  // Session files a phone is looking at: a change means "refetch" (debounced), for 10 minutes after the last look.
+  const watched = new Map()
+  function watchFile(file) {
+    const w = watched.get(file)
+    if (w) { w.until = Date.now() + 600000; return }
+    if (watched.size >= 8) {
+      const oldest = [...watched.entries()].sort((a, b) => a[1].until - b[1].until)[0]
+      oldest[1].w.close()
+      watched.delete(oldest[0])
+    }
+    let t = null
+    try {
+      const fw = fs.watch(file, () => { clearTimeout(t); t = setTimeout(() => agents.emit('change'), 1500) })
+      fw.on('error', () => { fw.close(); watched.delete(file) })
+      watched.set(file, { w: fw, until: Date.now() + 600000 })
+    } catch {}
+  }
+  const watchSweep = setInterval(() => { for (const [f, w] of watched) if (w.until < Date.now()) { w.w.close(); watched.delete(f) } }, 60000)
+  watchSweep.unref()
+  const bins = resolveBins()
   function hookCaller(req) {
     const got = Buffer.from(String(req.headers['x-pager-token'] || ''))
     const want = Buffer.from(hookToken)
@@ -300,7 +358,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   async function rootOf(sessionId) {
     if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400, code: 'bad-request' })
     if (sessionId.startsWith('agent:')) {
-      const s = agents.get(sessionId)
+      const s = agentInfo(sessionId)
       if (!s || !s.cwd) throw Object.assign(new Error('不知道这个会话的项目目录'), { status: 404, code: 'no-workspace' })
       return s.cwd
     }
@@ -420,12 +478,31 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
         if (!res.destroyed) json(req, res, 200, answer)
         return
       }
-      if (route === 'agents' && !isPost) return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode, away: agents.away(), sessions: agents.list(), asks: agents.asks() } })
+      if (route === 'agents' && !isPost) {
+        const pc = presence.get()
+        return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode, away: agents.away(), pc: pc && { idleMs: pc.idleMs, locked: pc.locked }, sessions: agentSessions(), asks: agents.asks() } })
+      }
       if (route === 'agents/history' && !isPost) {
-        const s = agents.get(url.searchParams.get('s'))
-        if (!s) throw Object.assign(new Error('这个会话的记录已经不在了（电脑重启后只保留新的事件）'), { status: 404, code: 'not-found' })
-        const items = s.timeline.map((it) => ({ ...it }))
-        return json(req, res, 200, { ok: true, value: { items, partial: null, firstSeq: items.length ? items[0].seq : -1, lastSeq: s.seq, hasMore: false, title: s.title } })
+        const key = url.searchParams.get('s') || ''
+        const info = agentInfo(key)
+        if (!info) throw Object.assign(new Error('找不到这个会话'), { status: 404, code: 'not-found' })
+        let items
+        let title = info.title
+        let truncated = false
+        if (info.file) {
+          const f = foldFile(info.file, info.src)
+          items = f.items
+          title = f.title || title
+          truncated = f.truncated
+          watchFile(info.file)
+        } else items = (agents.get(key) || { timeline: [] }).timeline.map((it) => ({ ...it }))
+        return json(req, res, 200, { ok: true, value: { items, partial: null, firstSeq: items.length ? items[0].seq : -1, lastSeq: items.length ? items[items.length - 1].seq : -1, hasMore: false, truncated, title } })
+      }
+      if (route === 'agents/prompt' && isPost) {
+        const b = await readJson(req, 64 * 1024)
+        const info = agentInfo(b.s || '')
+        if (!info) throw Object.assign(new Error('找不到这个会话'), { status: 404, code: 'not-found' })
+        return json(req, res, 200, { ok: true, value: agents.prompt(info, b.text, { spawnImpl: spawn, bins }) })
       }
       if (route === 'agents/mode' && isPost) { agents.setMode((await readJson(req, 4096)).mode); return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode } }) }
       if (route === 'push/key' && !isPost) return json(req, res, 200, { ok: true, value: { publicKey: push.publicKey(), devices: push.list().length } })
@@ -478,6 +555,8 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   function close() {
     clearTimeout(hubTimer)
     clearTimeout(hookTimer)
+    clearInterval(watchSweep)
+    for (const w of watched.values()) w.w.close()
     agents.close()
     presence.close()
     hub.stop()
@@ -528,9 +607,11 @@ class Bridge {
         if (this.agentT) return
         this.agentT = setTimeout(() => { this.agentT = null; this.send({ t: 'agents' }) }, 300)
       }
+      this.onAgentFail = (f) => this.send({ t: 'agentErr', s: f.s, msg: f.msg })
       agents.on('ask', this.onAgentAsk)
       agents.on('askDone', this.onAgentDone)
       agents.on('change', this.onAgentChange)
+      agents.on('fail', this.onAgentFail)
       for (const a of agents.asks()) this.send(askFrame(a))
     }
   }
@@ -666,6 +747,7 @@ class Bridge {
       this.agents.off('ask', this.onAgentAsk)
       this.agents.off('askDone', this.onAgentDone)
       this.agents.off('change', this.onAgentChange)
+      this.agents.off('fail', this.onAgentFail)
     }
     for (const ws of this.sockets) { try { ws.close() } catch {} }
     try { this.res.end() } catch {}

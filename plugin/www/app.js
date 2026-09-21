@@ -426,9 +426,8 @@
     if (!fromPop) history.pushState({ v: 'chat', s: id }, '', '#' + enc(id))
     show('chat')
     var ag = isAgent(id)
-    el.input.value = ag ? '' : S.drafts[id] || ''
-    el.input.disabled = ag
-    el.input.placeholder = ag ? '在电脑上继续这个会话（手机发消息即将支持）' : '发消息给 DSH'
+    el.input.value = S.drafts[id] || ''
+    el.input.placeholder = ag ? '继续这个会话（电脑在后台运行）' : '发消息给 DSH'
     el.attach.hidden = ag
     autosize()
     S.att = []
@@ -918,7 +917,7 @@
     })
     flush()
     c.pending.forEach(function (p) { h += userHtml(c, p) })
-    if (!h && isAgent(c.id)) { var ag = agentOf(c.id); h = '<div class="hint"><b>' + esc(ag ? ag.project || ag.name : '外部会话') + '</b>电脑上的新动态会出现在这里</div>' }
+    if (!h && isAgent(c.id)) { var ag = agentOf(c.id); h = '<div class="hint"><b>' + esc(ag ? ag.project || ag.name : '外部会话') + '</b>这个会话的记录会出现在这里，也可以从手机继续它</div>' }
     if (!h) h = '<div class="hint"><b>' + esc(wsTitle(wsOf(c.id))) + '</b>发一条消息开始</div>'
     el.msgs.innerHTML = h
     drawTail(c)
@@ -1006,9 +1005,11 @@
   }
   function syncSend() {
     if (S.cur && isAgent(S.cur)) {
+      // No stop button: a turn running on the PC is stopped there.
       el.send.className = 'send'
       el.send.innerHTML = ic('send')
-      el.send.disabled = true
+      el.send.disabled = !el.input.value.trim() || isRunning(S.cur)
+      el.send.setAttribute('aria-label', '发送')
       return
     }
     var has = el.input.value.trim() || S.att.length
@@ -1045,9 +1046,25 @@
       img.src = url
     })
   }
+  function sendAgent(c) {
+    var text = el.input.value.trim()
+    if (!text || isRunning(c.id)) return
+    el.send.disabled = true
+    buzz(8)
+    post('/m/api/agents/prompt', { s: c.id, text: text }).then(function () {
+      el.input.value = ''
+      delete S.drafts[c.id]
+      store.set('drafts', S.drafts)
+      autosize()
+      toast('已发到电脑，后台开始运行')
+      loadAgents()
+      setTimeout(function () { if (S.cur === c.id) loadHistory(c) }, 3000)
+    }, function (e) { syncSend(); toast('没发出去：' + e.message, 'err') })
+  }
   function send() {
     var c = S.cur && S.chats.get(S.cur)
     if (!c) return
+    if (isAgent(c.id)) { sendAgent(c); return }
     var text = el.input.value.trim(), att = S.att
     if (!text && !att.length) return
     var rid = uuid(), content = []

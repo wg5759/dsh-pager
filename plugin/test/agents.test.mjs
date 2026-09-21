@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { AgentHub, describeTool } from '../agents.js'
+import { EventEmitter } from 'node:events'
+import { AgentHub, describeTool, resolveBins } from '../agents.js'
 
 function rig({ idleMs = 1000, locked = false, mode, holdMs, dir } = {}) {
   const calls = { ask: [], askDone: [], emit: [] }
@@ -122,4 +123,51 @@ test('describeTool: Claude Code and Codex tool shapes', () => {
   assert.deepEqual(describeTool('Write', { file_path: 'C:\\a\\b.md', content: 'x' }), { what: 'Write b.md', detail: 'C:\\a\\b.md' })
   assert.equal(describeTool('apply_patch', { input: '*** Begin Patch' }).detail, '*** Begin Patch')
   assert.deepEqual(describeTool('mcp__x__y', {}), { what: 'mcp__x__y', detail: '' })
+})
+
+function fakeChild() {
+  const c = new EventEmitter()
+  c.stdout = new EventEmitter()
+  c.stderr = new EventEmitter()
+  return c
+}
+
+test('prompt from the phone: resume without a shell, busy guard, errors come back', async () => {
+  const { hub, calls } = rig({ idleMs: 1000 })
+  const spawned = []
+  const spawnImpl = (cmd, args, opts) => { const c = fakeChild(); spawned.push({ cmd, args, opts, c }); return c }
+  const bins = { claude: ['C:/n/node.exe', 'C:/g/cli.js'] }
+  const target = { key: 'agent:claude:s9', src: 'claude', sid: 's9', cwd: String.raw`D:\p\x` }
+  hub.prompt(target, '  再跑一次 & echo pwned | x > y ', { spawnImpl, bins })
+  const sp = spawned[0]
+  assert.deepEqual([sp.cmd, sp.args], ['C:/n/node.exe', ['C:/g/cli.js', '-p', '再跑一次 & echo pwned | x > y', '--resume', 's9', '--output-format', 'json']])
+  assert.deepEqual([sp.opts.shell, sp.opts.cwd], [false, String.raw`D:\p\x`])
+  assert.throws(() => hub.prompt(target, 'again', { spawnImpl, bins }), /正在运行/)
+  // A phone-started turn sends its dialogs to the phone even while someone sits at the PC.
+  const held = hub.handle('claude', { session_id: 's9', hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'ls' } })
+  await new Promise((r) => setImmediate(r))
+  assert.equal(calls.ask.length, 1)
+  hub.decide(calls.ask[0].id, 'rejected')
+  await held
+  sp.c.stdout.emit('data', '{"type":"result","is_error":true,"result":"Failed to authenticate. API Error: 401"}')
+  sp.c.emit('exit', 1)
+  const err = calls.emit.find((e) => e.t === 'err')
+  assert.deepEqual([err.s, err.msg], ['agent:claude:s9', 'Failed to authenticate. API Error: 401'])
+  assert.equal(hub.get('agent:claude:s9').running, false)
+  hub.prompt({ ...target, src: 'codex', key: 'agent:codex:s9' }, 'hi', { spawnImpl, bins: {} })
+  assert.deepEqual([spawned[1].cmd, spawned[1].args], ['codex', ['exec', 'resume', 's9', 'hi']])
+  spawned[1].c.emit('exit', 0)
+  assert.equal(calls.emit.filter((e) => e.t === 'err').length, 1)
+  assert.throws(() => hub.prompt(target, '   ', { spawnImpl, bins }), /空/)
+})
+
+test('resolveBins: native exe first, npm shim becomes node + entry, nothing found is null', () => {
+  const R = String.raw
+  const entry = path.join(R`C:\npm`, 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+  const files = new Set([path.join(R`C:\a`, 'claude.exe'), path.join(R`C:\npm`, 'codex.cmd'), entry])
+  const exists = (p) => files.has(p)
+  const b = resolveBins({ env: { PATH: [R`C:\a`, R`C:\npm`].join(path.delimiter) }, platform: 'win32', exists })
+  assert.deepEqual(b.claude, [path.join(R`C:\a`, 'claude.exe')])
+  assert.deepEqual(b.codex, [process.execPath, entry])
+  assert.deepEqual(resolveBins({ env: { PATH: R`C:\none` }, platform: 'win32', exists }), { claude: null, codex: null })
 })

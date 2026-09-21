@@ -8,6 +8,11 @@
  *   GET  /m/api/events       SSE: compact live frames bridged from DSH's two
  *                            WebSocket downlinks, text deltas coalesced
  *   GET  /m/api/img          one session image attachment, immutable-cached
+ *   GET  /m/api/call         one tool call unclipped (?s=&id=&seq=&rseq=)
+ *   GET  /m/api/fs           a directory listing or a file's text, inside the
+ *                            session's workspace only (?s=&path=; see files.js)
+ *   GET  /m/api/raw          an image / video / audio file of that workspace,
+ *                            with Range support
  *   POST /m/api/rpc          allowlisted DSH unary call {method, payload}
  *   POST /m/api/respond      approval / question answer {rpcId, result}
  *
@@ -30,8 +35,9 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue } from './fold.js'
+import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue, fullCall, resultCallId } from './fold.js'
 import { NotifyHub } from './notify.js'
+import { confine, describe as describeFile, parseRange, MEDIA } from './files.js'
 
 const WWW = path.join(path.dirname(fileURLToPath(import.meta.url)), 'www')
 
@@ -240,6 +246,64 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
     return { ...f, hasMore: Boolean(v.hasMore), title: f.title || (typeof pv.title === 'string' ? pv.title : undefined) }
   }
 
+  // ---- result viewer --------------------------------------------------------
+
+  let wsCache = null
+  async function rootOf(sessionId) {
+    if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400 })
+    if (!wsCache || Date.now() - wsCache.at > 10000) wsCache = { at: Date.now(), v: await value('workspace.list', {}) }
+    const w = wsCache.v.items.find((x) => (x.sessionIds || []).includes(sessionId))
+    if (!w || !w.path) throw Object.assign(new Error('这个对话不属于任何工作区，没有可查看的文件'), { status: 404, code: 'no-workspace' })
+    return w.path
+  }
+
+  /** One tool call with its full input, diff and output: the page ending at its result holds both. */
+  async function callDetail(url) {
+    const sessionId = url.searchParams.get('s')
+    const id = url.searchParams.get('id')
+    const seq = Number(url.searchParams.get('seq'))
+    const rseqRaw = url.searchParams.get('rseq')
+    const rseq = rseqRaw ? Number(rseqRaw) : NaN
+    if (!sessionId || !id || !Number.isFinite(seq)) throw Object.assign(new Error('missing s/id/seq'), { status: 400 })
+    const end = Number.isFinite(rseq) && rseq > seq ? rseq : seq
+    for (const maxMessages of [1, 4]) {
+      const v = await value('session.history', { sessionId, maxMessages, beforeSeq: end + 1 }, 90000)
+      let call = null
+      let result = null
+      for (const entry of v.events) {
+        const e = entry && entry.event
+        if (!e) continue
+        if (e.type === 'tool/call' && e.data && e.data.callId === id) call = entry
+        else if (e.type === 'tool/result' && resultCallId(e) === id) result = entry
+      }
+      if (call) return fullCall(call, result)
+    }
+    throw Object.assign(new Error('找不到这次操作的记录'), { status: 404, code: 'not-found' })
+  }
+
+  async function raw(url, req, res) {
+    const { real, stat } = await confine(await rootOf(url.searchParams.get('s')), url.searchParams.get('path'))
+    const type = MEDIA[path.extname(real).toLowerCase()]
+    if (!stat.isFile() || !type) throw Object.assign(new Error('这种文件不能直接打开'), { status: 415, code: 'unsupported' })
+    const headers = {
+      'content-type': type, 'accept-ranges': 'bytes', 'cache-control': 'private, no-cache',
+      'x-content-type-options': 'nosniff',
+      // An SVG opened directly must not run script.
+      'content-security-policy': "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox",
+      'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(real))}`,
+    }
+    const range = parseRange(req.headers.range, stat.size)
+    if (range === false) { res.writeHead(416, { ...headers, 'content-range': `bytes */${stat.size}` }); res.end(); return }
+    const { start, end } = range || { start: 0, end: stat.size - 1 }
+    const length = stat.size ? end - start + 1 : 0
+    res.writeHead(range ? 206 : 200, { ...headers, 'content-length': length, ...(range ? { 'content-range': `bytes ${start}-${end}/${stat.size}` } : {}) })
+    if (req.method === 'HEAD' || !length) { res.end(); return }
+    const stream = fs.createReadStream(real, { start, end })
+    stream.on('error', () => res.destroy())
+    req.on('close', () => stream.destroy())
+    stream.pipe(res)
+  }
+
   async function image(url, req, res) {
     const v = await value('session.attachment', { sessionId: url.searchParams.get('s'), attachmentId: url.searchParams.get('id') }, 60000)
     const buf = Buffer.from(v.data, 'base64')
@@ -267,6 +331,9 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
       if (route === 'boot' && !isPost) return json(req, res, 200, { ok: true, value: await boot() })
       if (route === 'history' && !isPost) return json(req, res, 200, { ok: true, value: await history(url) })
       if (route === 'img' && !isPost) return await image(url, req, res)
+      if (route === 'call' && !isPost) return json(req, res, 200, { ok: true, value: await callDetail(url) })
+      if (route === 'fs' && !isPost) return json(req, res, 200, { ok: true, value: await describeFile(await rootOf(url.searchParams.get('s')), url.searchParams.get('path')) })
+      if (route === 'raw' && !isPost) return await raw(url, req, res)
       if (route === 'events' && !isPost) return events(req, res)
       if (route === 'notify' && !isPost) {
         const since = url.searchParams.get('since')

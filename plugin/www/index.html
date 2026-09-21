@@ -57,6 +57,14 @@
     <div class="backdrop"></div>
     <div id="sheet" class="sheet" role="dialog"></div>
   </div>
+  <div id="fv" class="fv" hidden>
+    <header class="bar">
+      <button id="fvBack" class="ib" data-ic="back" aria-label="返回"></button>
+      <div class="ttl"><b id="fvTitle"></b><small id="fvSub"></small></div>
+      <button id="fvAct" class="ib" data-ic="copy" aria-label="复制全文" hidden></button>
+    </header>
+    <div id="fvBody" class="scroll fvb"></div>
+  </div>
   <div id="viewer" class="viewer" hidden><img alt=""></div>
   <div id="toast" class="toast" role="status"></div>
 </div>

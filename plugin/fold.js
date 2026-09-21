@@ -107,6 +107,24 @@ function firstLine(s) {
   return (i < 0 ? s : s.slice(0, i) + ' …').trim()
 }
 
+const PATH_KEYS = ['path', 'file_path', 'filePath', 'filename', 'file', 'target_file', 'output', 'output_path', 'outputPath', 'dest', 'destination']
+
+/**
+ * File paths a tool call names (diff targets, `path`-like arguments), for the
+ * phone's "open file" chips. The server confines every path to the session's
+ * workspace, so this may over-report; it must not throw.
+ */
+export function pathsOf(args, v) {
+  const out = []
+  const add = (p) => { if (typeof p === 'string' && p.trim() && p.length < 1024 && !/[\r\n]/.test(p) && !out.includes(p)) out.push(p) }
+  if (v && Array.isArray(v.diffs)) for (const d of v.diffs) add(d && d.path)
+  if (v && typeof v.path === 'string') add(v.path)
+  let o = args
+  if (typeof args === 'string') { try { o = JSON.parse(args) } catch { o = null } }
+  if (o && typeof o === 'object') for (const k of PATH_KEYS) add(o[k])
+  return out.slice(0, 6)
+}
+
 /** tool/call (+ host presenter view) -> one compact row. */
 export function foldCall(e, view) {
   const d = e.data || {}
@@ -123,10 +141,15 @@ export function foldCall(e, view) {
   } else {
     detail = prettyArgs(d.arguments)
   }
-  return {
+  const row = {
     k: 't', seq: e.seq, time: e.time, id: d.callId, name: d.name,
     kind: kindOf(d.name, v), title: cut(firstLine(title), 160), detail: clip(detail),
   }
+  const paths = pathsOf(d.arguments, v)
+  if (paths.length) row.paths = paths
+  // The full text stays on the PC; /m/api/call serves it when the phone asks.
+  if ((typeof detail === 'string' && detail.length > CAP) || (v && v.card === 'diff')) row.more = true
+  return row
 }
 
 function searchSummary(v) {
@@ -140,11 +163,18 @@ function searchSummary(v) {
   return `${total} 处匹配\n` + lines.join('\n')
 }
 
+/** The tool call a tool/result event answers. */
+export function resultCallId(e) {
+  const msg = (e.data && e.data.message) || {}
+  const block = (msg.content || []).find((b) => b && b.type === 'tool-result')
+  return (block && block.toolCallId) || (msg.source && msg.source.callId)
+}
+
 /** tool/result -> {id, err, out}; merged into the call row by the caller. */
 export function foldResult(e, view) {
   const msg = (e.data && e.data.message) || {}
   const block = (msg.content || []).find((b) => b && b.type === 'tool-result')
-  const id = (block && block.toolCallId) || (msg.source && msg.source.callId)
+  const id = resultCallId(e)
   const v = view && view.for === 'result' ? view.view : undefined
   let out
   if (v && v.card === 'terminal') out = (v.output || '') + (v.exitCode ? `\n[exit ${v.exitCode}]` : '')
@@ -152,7 +182,53 @@ export function foldResult(e, view) {
   else if (v && v.card === 'search') out = searchSummary(v)
   else if (v && v.card === 'diff') out = ''
   else out = textOf(block && block.content)
-  return { id, err: Boolean(block && block.isError), out: clip(String(out || '').replace(/\r\n/g, '\n')) }
+  out = String(out || '').replace(/\r\n/g, '\n')
+  const r = { id, err: Boolean(block && block.isError), out: clip(out) }
+  if (out.length > CAP) r.more = true
+  if (v && v.card === 'read' && typeof v.path === 'string') r.paths = [v.path]
+  return r
+}
+
+/** Longest text of one field /m/api/call returns (a terminal can print megabytes). */
+export const FULL_CAP = 512 * 1024
+
+function capFull(s) {
+  if (typeof s !== 'string') return { text: '', cut: false }
+  return s.length > FULL_CAP ? { text: clip(s, FULL_CAP), cut: true } : { text: s, cut: false }
+}
+
+/**
+ * The unclipped detail of one tool call, for the phone's result viewer.
+ * @param callEntry - `{event, view}` of the tool/call.
+ * @param resultEntry - `{event, view}` of its tool/result, when finished.
+ */
+export function fullCall(callEntry, resultEntry) {
+  const e = callEntry.event
+  const d = e.data || {}
+  const cv = callEntry.view && callEntry.view.for === 'call' ? callEntry.view.view : undefined
+  const row = foldCall(e, callEntry.view)
+  const input = capFull(cv && cv.card === 'terminal' ? cv.title || '' : cv && typeof cv.rawInput === 'string' ? cv.rawInput : prettyArgs(d.arguments))
+  const out = { id: row.id, name: row.name, kind: row.kind, title: row.title, input: input.text, paths: row.paths || [] }
+  if (cv && cv.card === 'diff' && Array.isArray(cv.diffs)) {
+    out.diffs = cv.diffs.map((x) => ({ path: x.path, oldText: x.oldText == null ? null : capFull(x.oldText).text, newText: x.newText == null ? null : capFull(x.newText).text }))
+  }
+  let truncated = input.cut
+  if (resultEntry) {
+    const msg = (resultEntry.event.data && resultEntry.event.data.message) || {}
+    const block = (msg.content || []).find((b) => b && b.type === 'tool-result')
+    const rv = resultEntry.view && resultEntry.view.for === 'result' ? resultEntry.view.view : undefined
+    let text
+    if (rv && rv.card === 'terminal') text = (rv.output || '') + (rv.exitCode ? `\n[exit ${rv.exitCode}]` : '')
+    else text = textOf(block && block.content)
+    const o = capFull(String(text || '').replace(/\r\n/g, '\n'))
+    out.out = o.text
+    out.err = Boolean(block && block.isError)
+    out.done = true
+    truncated = truncated || o.cut
+    if (rv && rv.card === 'read' && typeof rv.path === 'string' && !out.paths.includes(rv.path)) out.paths.push(rv.path)
+  }
+  if (truncated) out.cut = true
+  return out
 }
 
 /** Fold one streaming chunk into an in-flight partial. */
@@ -211,7 +287,11 @@ export function foldHistory(entries) {
       case 'tool/result': {
         const r = foldResult(e, entry.view)
         const t = calls.get(r.id)
-        if (t) Object.assign(t, { done: true, err: r.err, out: r.out })
+        if (t) {
+          Object.assign(t, { done: true, err: r.err, out: r.out, rseq: e.seq })
+          if (r.more) t.more = true
+          if (r.paths) t.paths = [...new Set([...(t.paths || []), ...r.paths])]
+        }
         break
       }
       case 'turn/start':

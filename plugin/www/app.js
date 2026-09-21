@@ -213,7 +213,8 @@
   }
   var el = {}
   ;['app', 'home', 'chat', 'status', 'chips', 'list', 'rows', 'ptr', 'fab', 'searchBox', 'q', 'cTitle', 'cSub', 'scroller', 'older', 'msgs', 'tail',
-    'toBottom', 'dock', 'input', 'send', 'attach', 'file', 'thumbs', 'sheetWrap', 'sheet', 'viewer', 'toast', 'head'].forEach(function (id) { el[id] = document.getElementById(id) })
+    'toBottom', 'dock', 'input', 'send', 'attach', 'file', 'thumbs', 'sheetWrap', 'sheet', 'viewer', 'toast', 'head',
+    'fv', 'fvBody', 'fvTitle', 'fvSub', 'fvAct'].forEach(function (id) { el[id] = document.getElementById(id) })
 
   function chatState(id) {
     return { id: id, items: [], pending: [], partial: null, lastSeq: -1, firstSeq: -1, hasMore: false, loaded: false, loading: false, err: false,
@@ -393,25 +394,30 @@
     store.set('drafts', S.drafts)
   }
 
-  // overlays (sheet / viewer) own one history entry so Android back closes them
-  var overlay = null
+  // Overlays (sheet, image viewer, file viewer levels) form a stack; each owns
+  // one history entry, tagged with its depth, so Android back closes exactly
+  // one level and history.go(-n) closes several.
+  var overlays = [], closing = null
   function pushOverlay(kind, onClose) {
-    overlay = { kind: kind, onClose: onClose, resolve: null }
-    history.pushState(Object.assign({}, history.state, { o: kind }), '')
+    overlays.push({ kind: kind, onClose: onClose })
+    history.pushState(Object.assign({}, history.state, { o: kind, od: overlays.length }), '')
   }
+  function hasOverlay(kind) { return overlays.some(function (o) { return o.kind === kind }) }
   function closeOverlay() {
-    if (!overlay) return Promise.resolve()
-    return new Promise(function (res) { overlay.resolve = res; history.back() })
+    if (!overlays.length) return Promise.resolve()
+    return new Promise(function (res) { closing = res; history.back() })
+  }
+  function closeAllOverlays() {
+    if (!overlays.length) return Promise.resolve()
+    return new Promise(function (res) { closing = res; history.go(-overlays.length) })
   }
   window.addEventListener('popstate', function (e) {
-    if (overlay) {
-      var o = overlay
-      overlay = null
-      o.onClose()
-      if (o.resolve) o.resolve()
+    var st = e.state || {}
+    if (overlays.length > (st.od || 0)) {
+      while (overlays.length > (st.od || 0)) overlays.pop().onClose()
+      if (closing) { var done = closing; closing = null; done() }
       return
     }
-    var st = e.state || {}
     if (st.v === 'chat' && st.s) openChat(st.s, true)
     else if (S.cur) closeChat()
   })
@@ -423,13 +429,154 @@
     requestAnimationFrame(function () { requestAnimationFrame(function () { el.sheetWrap.classList.add('on') }) })
     pushOverlay('sheet', function () {
       el.sheetWrap.classList.remove('on')
-      setTimeout(function () { if (!overlay) { el.sheetWrap.hidden = true; el.sheet.innerHTML = '' } }, 340)
+      setTimeout(function () { if (!hasOverlay('sheet')) { el.sheetWrap.hidden = true; el.sheet.innerHTML = '' } }, 340)
     })
   }
   function view(src) {
     el.viewer.firstElementChild.src = src
     el.viewer.hidden = false
     pushOverlay('viewer', function () { el.viewer.hidden = true; el.viewer.firstElementChild.removeAttribute('src') })
+  }
+
+  // ------------------------------------------------------------ result viewer
+  // One full-screen page per level: a tool call's full detail, a folder, a
+  // file. Each level is an overlay, so back walks up the way the user came.
+  var fv = []
+  function fsize(n) { return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB' }
+  function baseName(p) { var s = String(p || '').replace(/[\\/]+$/, ''); return s.slice(Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')) + 1) || s }
+  function dirName(rel) { var i = String(rel || '').lastIndexOf('/'); return i < 0 ? '' : rel.slice(0, i) }
+  function rawUrl(s, rel) { return '/m/api/raw?s=' + enc(s) + '&path=' + enc(rel) }
+  function fvOpen(en) {
+    fv.push(en)
+    el.fv.hidden = false
+    requestAnimationFrame(function () { requestAnimationFrame(function () { el.fv.classList.add('on') }) })
+    pushOverlay('fv', function () {
+      fv.pop()
+      if (fv.length) { fvShow(); return }
+      el.fv.classList.remove('on')
+      setTimeout(function () { if (!fv.length) { el.fv.hidden = true; el.fvBody.innerHTML = '' } }, 320)
+    })
+    fvShow()
+  }
+  function fvShow() {
+    var en = fv[fv.length - 1]
+    el.fvTitle.textContent = en.title || ''
+    el.fvSub.textContent = en.sub || ''
+    el.fvAct.hidden = true
+    el.fvBody.scrollTop = 0
+    if (en.data) { fvPaint(en); return }
+    el.fvBody.innerHTML = '<div class="spin"></div>'
+    var url = en.kind === 'call'
+      ? '/m/api/call?s=' + enc(en.s) + '&id=' + enc(en.id) + '&seq=' + en.seq + (en.rseq ? '&rseq=' + en.rseq : '')
+      : '/m/api/fs?s=' + enc(en.s) + '&path=' + enc(en.path || '')
+    get(url).then(function (v) {
+      en.data = v
+      if (fv[fv.length - 1] === en) fvPaint(en)
+    }, function (e) {
+      if (fv[fv.length - 1] === en) el.fvBody.innerHTML = '<div class="empty"><b>打不开</b>' + esc(e.message) + '</div>'
+    })
+  }
+  // Chips only for files the viewer can open: relative paths, or absolute
+  // ones under the session's workspace (the server enforces the same rule).
+  function wsRoot(sid) { var w = wsOf(sid); return w && S.wsById[w] ? S.wsById[w].path : '' }
+  function normP(p) { return String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() }
+  function inRoot(p, root) {
+    if (!/^([a-zA-Z]:[\\/]|[\\/])/.test(p)) return true
+    var a = normP(p), r = normP(root)
+    return Boolean(r) && (a === r || a.indexOf(r + '/') === 0)
+  }
+  function chipsHtml(paths, root) {
+    return (paths || []).filter(function (p) { return inRoot(p, root) }).map(function (p) {
+      return '<button data-fp="' + esc(p) + '">' + ic('read', 's') + '<span>' + esc(baseName(p)) + '</span></button>'
+    }).join('')
+  }
+  function fvPaint(en) {
+    var d = en.data, h = ''
+    if (en.kind === 'call') {
+      el.fvSub.textContent = toolLabel(d.name) + (d.done ? (d.err ? ' · 失败' : ' · 完成') : ' · 进行中')
+      var chips = chipsHtml(d.paths, wsRoot(en.s))
+      if (chips) h += '<div class="tacts fvchips">' + chips + '</div>'
+      if (d.diffs && d.diffs.length) d.diffs.forEach(function (x) { h += diffHtml(x) })
+      else if (d.input) h += '<div class="fvsec">内容</div><pre class="fvtext">' + esc(d.input) + '</pre>'
+      if (d.out) h += '<div class="fvsec">' + (d.err ? '出错信息' : '结果') + '</div><pre class="fvtext' + (d.err ? ' bad' : '') + '">' + esc(d.out) + '</pre>'
+      if (d.cut) h += '<div class="fvnote">内容过长，只显示开头和结尾</div>'
+      if (d.out || d.input) { el.fvAct.hidden = false; el.fvAct.onclick = function () { copy(d.out || d.input) } }
+    } else if (d.kind === 'dir') {
+      el.fvSub.textContent = d.rel ? '/' + d.rel : '工作区根目录'
+      h += d.entries.length ? '<div class="grp fl">' + d.entries.map(function (x) {
+        var media = /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif|mp4|m4v|webm|mov|mp3|m4a|aac|wav|ogg|flac)$/i.test(x.name)
+        return '<button class="row" data-fe="' + esc(x.name) + '" data-dir="' + (x.dir ? 1 : '') + '"><span class="fic' + (x.dir ? ' d' : '') + '">' + ic(x.dir ? 'folder' : media ? 'image' : 'read', 's') + '</span><div class="mid"><div class="t">' + esc(x.name) +
+          '</div><div class="m">' + (x.dir ? '文件夹' : fsize(x.size)) + ' · ' + when(x.at) + '</div></div>' + (x.dir ? ic('chev', 's') : '') + '</button>'
+      }).join('') + '</div>' : '<div class="empty"><b>空文件夹</b></div>'
+      if (d.more) h += '<div class="fvnote">文件太多，只列出前 500 个</div>'
+    } else {
+      el.fvSub.textContent = fsize(d.size) + ' · ' + when(d.at) + (d.enc && d.enc !== 'utf-8' ? ' · ' + d.enc.toUpperCase() : '')
+      h += '<div class="tacts fvchips"><button data-fdir="' + esc(dirName(d.rel)) + '">' + ic('folder', 's') + '<span>所在文件夹</span></button></div>'
+      if (d.kind === 'media') {
+        var u = rawUrl(en.s, d.rel)
+        if (/^image\//.test(d.type)) h += '<img class="fvimg" src="' + esc(u) + '" alt="">'
+        else if (/^video\//.test(d.type)) h += '<video class="fvmedia" controls playsinline preload="metadata" src="' + esc(u) + '"></video>'
+        else h += '<audio class="fvmedia" controls preload="metadata" src="' + esc(u) + '"></audio>'
+      } else if (d.kind === 'binary') {
+        h += '<div class="empty"><b>无法预览</b>这是二进制文件（' + fsize(d.size) + '）</div>'
+      } else {
+        var isMd = /\.(md|markdown)$/i.test(d.name)
+        if (isMd) h += '<div class="seg"><button class="' + (en.src ? '' : 'on') + '" data-mdv="0">预览</button><button class="' + (en.src ? 'on' : '') + '" data-mdv="1">源码</button></div>'
+        h += isMd && !en.src ? '<div class="md fvmd">' + md(d.text) + '</div>' : '<pre class="fvtext">' + esc(d.text) + '</pre>'
+        if (d.truncated) h += '<div class="fvnote">文件较大，只显示前 1 MB</div>'
+        el.fvAct.hidden = false
+        el.fvAct.onclick = function () { copy(d.text) }
+      }
+    }
+    el.fvBody.innerHTML = h
+  }
+
+  // Line diff for the edit card: LCS over lines, unchanged runs folded to 3
+  // lines of context. Big inputs fall back to "all old, then all new".
+  function lineDiff(a, b) {
+    var n = a.length, m = b.length, out = []
+    if (n * m > 4e6) {
+      a.forEach(function (s) { out.push(['-', s]) })
+      b.forEach(function (s) { out.push(['+', s]) })
+      return out
+    }
+    var w = m + 1, L = new Uint32Array((n + 1) * w)
+    for (var i = n - 1; i >= 0; i--) for (var j = m - 1; j >= 0; j--) L[i * w + j] = a[i] === b[j] ? L[(i + 1) * w + j + 1] + 1 : Math.max(L[(i + 1) * w + j], L[i * w + j + 1])
+    i = 0; j = 0
+    while (i < n && j < m) {
+      if (a[i] === b[j]) { out.push([' ', a[i]]); i++; j++ }
+      else if (L[(i + 1) * w + j] >= L[i * w + j + 1]) out.push(['-', a[i++]])
+      else out.push(['+', b[j++]])
+    }
+    while (i < n) out.push(['-', a[i++]])
+    while (j < m) out.push(['+', b[j++]])
+    return out
+  }
+  function diffHtml(x) {
+    var a = x.oldText == null ? [] : String(x.oldText).replace(/\r\n/g, '\n').split('\n')
+    var b = x.newText == null ? [] : String(x.newText).replace(/\r\n/g, '\n').split('\n')
+    var rows = lineDiff(a, b), keep = new Array(rows.length), adds = 0, dels = 0
+    rows.forEach(function (r, k) {
+      if (r[0] === '+') adds++
+      if (r[0] === '-') dels++
+      if (r[0] !== ' ') for (var q = Math.max(0, k - 3); q <= Math.min(rows.length - 1, k + 3); q++) keep[q] = true
+    })
+    var h = '', skipped = []
+    function line(r) { h += '<span class="l ' + (r[0] === '+' ? 'add' : r[0] === '-' ? 'del' : 'ctx') + '" data-m="' + r[0] + '">' + (esc(r[1]) || ' ') + '</span>' }
+    // Fold only runs worth folding; a marker for one or two lines costs more than it saves.
+    function flushSkip() {
+      if (skipped.length >= 4) h += '<span class="l skip">⋯ ' + skipped.length + ' 行未改动 ⋯</span>'
+      else skipped.forEach(line)
+      skipped = []
+    }
+    rows.forEach(function (r, k) {
+      if (!keep[k] && rows.length > 12) { skipped.push(r); return }
+      flushSkip()
+      line(r)
+    })
+    flushSkip()
+    var tag = x.oldText == null ? '新建' : x.newText == null ? '删除' : '修改'
+    return '<div class="diff"><button class="dh" data-fp="' + esc(x.path || '') + '"><b>' + tag + '</b><span>' + esc(x.path || '') + '</span><em class="ok">+' + adds + '</em><em class="bad">−' + dels + '</em></button><pre>' + h + '</pre></div>'
   }
 
   // ------------------------------------------------------------ chat: data
@@ -575,7 +722,12 @@
         if (!fresh(c, f.seq)) return
         for (var k = c.items.length - 1; k >= 0; k--) {
           var t = c.items[k]
-          if (t.k === 't' && t.id === f.id) { t.done = true; t.err = f.err; t.out = f.out; break }
+          if (t.k === 't' && t.id === f.id) {
+            t.done = true; t.err = f.err; t.out = f.out; t.rseq = f.seq
+            if (f.more) t.more = true
+            if (f.paths) t.paths = (t.paths || []).concat(f.paths.filter(function (p) { return !t.paths || t.paths.indexOf(p) < 0 }))
+            break
+          }
         }
         draw(c)
         return
@@ -645,6 +797,8 @@
     if (t._o) {
       if (t.detail && t.detail !== t.title) body += '<pre>' + esc(t.detail) + '</pre>'
       if (t.out) body += '<pre class="out' + (t.err ? ' bad' : '') + '">' + esc(t.out) + '</pre>'
+      var acts = (t.more ? '<button data-full="' + esc(t.id) + '">' + ic('read', 's') + '<span>完整内容</span></button>' : '') + chipsHtml(t.paths, wsRoot(S.cur))
+      if (acts) body += '<div class="tacts">' + acts + '</div>'
     }
     return '<div class="tr' + (t._o ? ' o' : '') + '"><button class="trh" data-tool="' + esc(t.id) + '">' + ic(KI[t.kind] || 'other', 's') + '<span>' + esc(t.title) + '</span>' + st + '</button>' + body + '</div>'
   }
@@ -928,6 +1082,7 @@
     if (!c) return
     openSheet('<div class="sh-h">' + esc(el.cTitle.textContent) + '</div><div class="sh-b">' +
       '<button class="opt-row" data-a="model"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>切换模型</b><small>' + esc(modelName(c) || '当前模型') + '</small></span>' + ic('chev', 's') + '</button>' +
+      '<button class="opt-row" data-a="files"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>工作区文件</b><small>' + esc(wsTitle(wsOf(c.id))) + '</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="rename"><span class="ico">' + ic('pen', 's') + '</span><span class="mid"><b>重命名</b></span></button>' +
       '<button class="opt-row danger" data-a="archive"><span class="ico">' + ic('archive', 's') + '</span><span class="mid"><b>归档对话</b><small>从列表隐藏，记录仍保存在电脑上</small></span></button></div>')
     el.sheet.onclick = function (e) {
@@ -937,6 +1092,7 @@
       if (a === 'archive' && !b.dataset.sure) { b.dataset.sure = '1'; b.querySelector('b').textContent = '再点一次确认归档'; buzz(); return }
       closeOverlay().then(function () {
         if (a === 'model') modelSheet()
+        else if (a === 'files') fvOpen({ kind: 'path', s: c.id, path: '', title: wsTitle(wsOf(c.id)) || '工作区' })
         else if (a === 'rename') renameSheet()
         else if (a === 'archive') archive(c.id)
       })
@@ -1044,6 +1200,21 @@
   document.getElementById('more').onclick = moreSheet
   el.sheetWrap.firstElementChild.onclick = function () { closeOverlay() }
   el.viewer.onclick = function () { closeOverlay() }
+  document.getElementById('fvBack').onclick = function () { history.back() }
+  el.fvBody.addEventListener('click', function (e) {
+    var en = fv[fv.length - 1], b
+    if (!en) return
+    if ((b = e.target.closest('a[href]'))) { e.preventDefault(); window.open(b.href, '_blank', 'noopener'); return }
+    if ((b = e.target.closest('[data-fe]'))) {
+      fvOpen({ kind: 'path', s: en.s, path: (en.data.rel ? en.data.rel + '/' : '') + b.dataset.fe, title: b.dataset.fe })
+      return
+    }
+    if ((b = e.target.closest('[data-fp]'))) { if (b.dataset.fp) fvOpen({ kind: 'path', s: en.s, path: b.dataset.fp, title: baseName(b.dataset.fp) }); return }
+    if ((b = e.target.closest('[data-fdir]'))) { fvOpen({ kind: 'path', s: en.s, path: b.dataset.fdir, title: baseName(b.dataset.fdir) || '工作区' }); return }
+    if ((b = e.target.closest('[data-mdv]'))) { en.src = b.dataset.mdv === '1'; fvPaint(en); return }
+    if ((b = e.target.closest('[data-copy]'))) { copy(b.closest('pre').querySelector('code').textContent); return }
+    if ((b = e.target.closest('.fvimg'))) view(b.src)
+  })
 
   // pull to refresh (home list)
   ;(function () {
@@ -1074,6 +1245,14 @@
     var c = S.chats.get(S.cur), b
     if (!c) return
     if ((b = e.target.closest('a[href]'))) { e.preventDefault(); window.open(b.href, '_blank', 'noopener'); return }
+    if ((b = e.target.closest('[data-full]'))) {
+      for (var n = c.items.length - 1; n >= 0; n--) {
+        var ft = c.items[n]
+        if (ft.k === 't' && ft.id === b.dataset.full) { fvOpen({ kind: 'call', s: c.id, id: ft.id, seq: ft.seq, rseq: ft.rseq, title: ft.title }); break }
+      }
+      return
+    }
+    if ((b = e.target.closest('[data-fp]'))) { fvOpen({ kind: 'path', s: c.id, path: b.dataset.fp, title: baseName(b.dataset.fp) }); return }
     if ((b = e.target.closest('[data-group]'))) { var k = +b.dataset.group; if (c.open.has(k)) c.open.delete(k); else c.open.add(k); renderMsgs(c, false, true); return }
     if ((b = e.target.closest('[data-tool]'))) {
       for (var i = c.items.length - 1; i >= 0; i--) if (c.items[i].k === 't' && c.items[i].id === b.dataset.tool) { c.items[i]._o = !c.items[i]._o; break }
@@ -1176,7 +1355,7 @@
   // The Android shell calls this when a notification is tapped.
   window.dshOpen = function (id) {
     if (!id) return
-    if (overlay) closeOverlay().then(function () { openChat(id) })
+    if (overlays.length) closeAllOverlays().then(function () { openChat(id) })
     else if (S.cur !== id) openChat(id)
   }
   // /m/?debug exposes the frame entry point for UI checks with synthetic frames.

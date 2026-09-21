@@ -1,7 +1,7 @@
 // Fixtures mirror event shapes captured from real DSH session logs (2026-09-21).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { foldHistory, foldCall, foldResult, foldQueue, clip, CAP } from '../fold.js'
+import { foldHistory, foldCall, foldResult, foldQueue, clip, CAP, pathsOf, fullCall, resultCallId } from '../fold.js'
 
 const ev = (seq, type, data, extra = {}) => ({ event: { type, seq, time: 1000 + seq, data }, ...extra })
 const chunk = (seq, c) => ev(seq, 'assistant/chunk', { turn: 1, step: 1, chunk: c })
@@ -148,4 +148,47 @@ test('queue hides model-only context items', () => {
     { id: 'b', placement: 'context', message: { content: [{ type: 'text', text: 'hidden' }] } },
   ])
   assert.deepEqual(q, [{ id: 'a', place: 'queued', text: '下一条' }])
+})
+
+test('result viewer: rows carry file paths, rseq and a "more" flag', () => {
+  const big = 'x'.repeat(CAP + 10)
+  const f = foldHistory([
+    ev(1, 'tool/call', { callId: 'c1', name: 'write', arguments: JSON.stringify({ path: 'out/report.md', content: 'hi' }) }),
+    ev(2, 'tool/result', { message: { content: [{ type: 'tool-result', toolCallId: 'c1', content: [{ type: 'text', text: 'ok' }] }] } }),
+    ev(3, 'tool/call', { callId: 'c2', name: 'edit', arguments: '{}' },
+      { view: { for: 'call', view: { card: 'diff', diffs: [{ path: 'src/a.js', oldText: 'a', newText: 'b' }] } } }),
+    ev(4, 'tool/call', { callId: 'c3', name: 'pwsh', arguments: '{"command":"dir"}' }),
+    ev(5, 'tool/result', { message: { content: [{ type: 'tool-result', toolCallId: 'c3', content: [{ type: 'text', text: big }] }] } }),
+    ev(6, 'tool/call', { callId: 'c4', name: 'read', arguments: '{}' }),
+    ev(7, 'tool/result', { message: { content: [{ type: 'tool-result', toolCallId: 'c4', content: [] }] } },
+      { view: { for: 'result', view: { card: 'read', path: 'docs/x.md', totalLines: 3 } } }),
+  ])
+  const [w, e, p, r] = f.items
+  assert.deepEqual([w.paths, w.rseq, w.more], [['out/report.md'], 2, undefined])
+  assert.deepEqual([e.paths, e.more], [['src/a.js'], true])
+  assert.deepEqual([p.paths, p.more, p.out.length < big.length], [undefined, true, true])
+  assert.deepEqual(r.paths, ['docs/x.md'])
+})
+
+test('pathsOf: tolerant of junk, deduplicated, capped', () => {
+  assert.deepEqual(pathsOf('not json', null), [])
+  assert.deepEqual(pathsOf({ file_path: 'a.txt', path: 'a.txt', dest: 'b\nc' }, null), ['a.txt'])
+  assert.deepEqual(pathsOf('{"output":"o.png"}', { diffs: [{ path: 'd.js' }, null] }), ['d.js', 'o.png'])
+  assert.equal(pathsOf({}, { diffs: Array.from({ length: 9 }, (_, i) => ({ path: 'f' + i })) }).length, 6)
+})
+
+test('fullCall: unclipped input, diff texts and terminal output', () => {
+  const long = 'L'.repeat(CAP * 3)
+  const call = ev(10, 'tool/call', { callId: 'k', name: 'edit', arguments: JSON.stringify({ path: 'a.md' }) },
+    { view: { for: 'call', view: { card: 'diff', title: 'Edit a.md', diffs: [{ path: 'a.md', oldText: long, newText: null }] } } })
+  const result = ev(11, 'tool/result', { message: { content: [{ type: 'tool-result', toolCallId: 'k', isError: true, content: [] }] } },
+    { view: { for: 'result', view: { card: 'terminal', output: long + '\r\nend', exitCode: 2 } } })
+  assert.equal(resultCallId(result.event), 'k')
+  const d = fullCall(call, result)
+  assert.equal(d.diffs[0].oldText.length, long.length)
+  assert.equal(d.diffs[0].newText, null)
+  assert.equal(d.out, long + '\nend\n[exit 2]')
+  assert.deepEqual([d.err, d.done, d.cut, d.paths], [true, true, undefined, ['a.md']])
+  const pending = fullCall(call, null)
+  assert.deepEqual([pending.done, pending.out], [undefined, undefined])
 })

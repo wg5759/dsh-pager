@@ -301,6 +301,47 @@ input, textarea { font: inherit; color: inherit; }
 .sh-in .btns { margin-top: 14px; }
 .spin { width: 24px; height: 24px; margin: 28px auto; border-radius: 50%; border: 2.5px solid var(--line); border-top-color: var(--accent); animation: spin 0.8s linear infinite; }
 .spin.s { width: 14px; height: 14px; margin: 0; border-width: 2px; flex: none; }
+/* ---------- result viewer ---------- */
+.tacts { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 12px 10px; }
+.tacts button { height: 30px; max-width: 100%; padding: 0 11px; border-radius: 15px; background: var(--accent-soft); color: var(--accent); font-size: 12.5px; font-weight: 550; display: inline-flex; align-items: center; gap: 5px; }
+.tacts button span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tacts button:active { opacity: 0.7; }
+.fv { position: fixed; inset: 0; z-index: 25; display: flex; flex-direction: column; background: var(--bg); padding-top: var(--sat); transform: translateX(100%); transition: transform 0.32s var(--ease); }
+.fv.on { transform: none; }
+.fv .bar { padding: 0 4px; border-bottom: 1px solid var(--line); }
+.fvb { padding: 12px 12px calc(28px + var(--sab)); -webkit-user-select: text; user-select: text; }
+.fvchips { margin: 0 0 12px; }
+.fvsec { font-size: 12.5px; font-weight: 600; color: var(--text3); margin: 14px 2px 6px; }
+.fvsec:first-child { margin-top: 0; }
+.fvtext { margin: 0; padding: 12px; background: var(--surface); border-radius: 12px; box-shadow: 0 0 0 1px var(--line) inset; font: 12.5px/1.6 var(--mono); white-space: pre-wrap; word-break: break-all; tab-size: 4; }
+.fvtext.bad { color: var(--bad); background: var(--bad-soft); box-shadow: none; }
+.fvmd { background: var(--surface); border-radius: 12px; box-shadow: 0 0 0 1px var(--line) inset; padding: 14px; }
+.fvnote { font-size: 12.5px; color: var(--text3); margin: 8px 2px; }
+.fvimg { display: block; max-width: 100%; margin: 0 auto; border-radius: 10px; background: repeating-conic-gradient(rgba(128, 128, 128, 0.18) 0% 25%, transparent 0% 50%) 50% / 16px 16px; }
+.fvmedia { display: block; width: 100%; border-radius: 10px; background: #000; }
+audio.fvmedia { background: none; }
+.fl { margin: 0; }
+.fl .row { align-items: center; }
+.fl .t { -webkit-line-clamp: 1; word-break: break-all; }
+.fic { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: var(--sunken); color: var(--text2); flex: none; }
+.fic.d { background: var(--accent-soft); color: var(--accent); }
+.seg { display: inline-flex; padding: 3px; border-radius: 12px; background: var(--sunken); margin: 0 0 10px; }
+.seg button { height: 30px; padding: 0 14px; border-radius: 9px; font-size: 13px; color: var(--text2); }
+.seg button.on { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
+.diff { background: var(--surface); border-radius: 12px; overflow: hidden; box-shadow: 0 0 0 1px var(--line) inset; margin-bottom: 12px; }
+.diff .dh { display: flex; align-items: center; gap: 8px; width: 100%; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 12.5px; text-align: left; }
+.diff .dh b { color: var(--accent); flex: none; }
+.diff .dh span { flex: 1; min-width: 0; font-family: var(--mono); color: var(--text2); word-break: break-all; }
+.diff .dh em { font-style: normal; font-weight: 600; flex: none; }
+.diff .dh em.ok { color: var(--ok); }
+.diff .dh em.bad { color: var(--bad); }
+.diff pre { margin: 0; padding: 6px 0; font: 12px/1.55 var(--mono); }
+.diff .l { display: block; position: relative; padding: 0 12px 0 24px; white-space: pre-wrap; word-break: break-all; }
+.diff .l::before { content: attr(data-m); position: absolute; left: 9px; color: var(--text3); }
+.diff .l.add { background: rgba(18, 161, 80, 0.13); }
+.diff .l.del { background: var(--bad-soft); }
+.diff .l.skip { padding: 2px 12px; text-align: center; color: var(--text3); background: var(--sunken); font-family: inherit; }
+
 .viewer { position: fixed; inset: 0; z-index: 30; background: #000; display: grid; place-items: center; }
 .viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .toast { position: fixed; left: 50%; bottom: calc(120px + var(--sab)); z-index: 40; transform: translate(-50%, 12px); opacity: 0; pointer-events: none; max-width: calc(100% - 48px); padding: 10px 16px; border-radius: 20px; background: rgba(22, 24, 29, 0.92); color: #fff; font-size: 14px; line-height: 1.45; transition: opacity 0.2s, transform 0.2s; text-align: center; }

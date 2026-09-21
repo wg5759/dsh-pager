@@ -41,8 +41,8 @@
     <button type="submit">连接</button>
   </form>
   <div class="tips">
-    <div><b>通过 VPN</b>（Tailscale / WireGuard）：<code>http://100.x.y.z:8080</code></div>
-    <div><b>自建鉴权网关</b>：<code>https://你的域名:端口</code></div>
+    <div><b>自建登录网关</b>（推荐）：<code>https://你的域名:端口</code></div>
+    <div><b>异地组网</b>（EasyTier / ZeroTier 等，与翻墙无关）：<code>http://100.x.y.z:8080</code></div>
     <div><b>同一局域网</b>：<code>http://192.168.x.x:8080</code></div>
   </div>
 </main>
@@ -54,7 +54,7 @@
   input.oninput = function () {
     var v = input.value.trim()
     if (/^http:\/\//i.test(v) && !/^http:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.)/i.test(v)) {
-      msg.className = 'msg warn'; msg.textContent = 'http 明文只适合 VPN 或局域网内使用；公网请用 https'
+      msg.className = 'msg warn'; msg.textContent = 'http 明文只适合异地组网或局域网内使用；公网请用 https'
     } else { msg.className = 'msg'; msg.textContent = '' }
   }
   document.getElementById('f').onsubmit = function (e) {

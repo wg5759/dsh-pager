@@ -23,7 +23,7 @@ dsh-pager 分别对应三件事：一套为手机重写的界面，在电脑上�
 
 ```
 手机 · dsh-pager App（33 KB：WebView 外壳 + 常驻通知服务）
-   │   你已有的远程通道：VPN（Tailscale / WireGuard …）或带登录的反向代理
+   │   你已有的远程通道：国内云服务器上的登录网关，或异地组网（与翻墙无关）
    ▼
 DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
    └─ 插件 dsh-pager，挂在 /m
@@ -61,7 +61,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 - **不增加暴露面**：挂在 DSH 自己的 web 服务上，不开新端口，DSH 仍只绑 127.0.0.1。
   - 接口沿用 DSH 同款信任栅栏（Host / Origin / 跨站检查）。
   - RPC 只放行 9 个方法（新建会话、发消息、停止、查/选模型、改名、搜索、排队、归档），设置、密钥这类接口一个不开。
-- **不绑定通道**：走你已经在用的 VPN 或带登录的反代，不内置第三方隧道或中继。流量不经过别人的服务器，国内网络也友好。
+- **不绑定通道**：走你已有的登录网关或异地组网，不内置第三方隧道或中继。流量不经过别人的服务器，用国内云服务器就能全程国内直连（作者自用的就是这样）。
 - **只用 DSH 公开的线协议**（`POST /api/<方法>`、`/api/events.*`），不依赖 DSH 内部模块，DSH 升级时不容易坏。
 - **小而可审计**：
   - 服务端约 1,000 行原生 JS，零 npm 依赖；界面是原生 JS/CSS，无框架。
@@ -81,12 +81,12 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 | [dsh-remote-web-gateway](https://github.com/summer1238/dsh-remote-web-gateway) | 网关插件 | 网页 | Cloudflare Quick Tunnel | GitHub 登录 + 一次性配对 + 设备撤销 | 未提及 | 无 App |
 | [DSH Mobile (sorsama)](https://github.com/sorsama/deepseek-harness-mobile) | 原生 Compose App + dsh-relay 插件 | 原生，功能对齐 GUI | 局域网 / relay / 自有反代 | relay 配对 + 固定公钥 | 前台服务：回合完成、目标完成或受阻、审阅或提问等待 | 14.5 MB |
 | [dsh-remote-mobile](https://github.com/IceApriler/dsh-remote-mobile) | 安全网关插件 + 移动端样式 | 桌面界面 + 移动端 CSS | 局域网 / Tailscale | 扫码 + RSA + 防爆破 | 未提及 | 无 App |
-| **dsh-pager（本项目）** | 插件（挂 /m）+ WebView 外壳 | 为手机重写的界面，服务端先折叠 | 任意现有通道，不内置隧道 | 交给你的 VPN 或网关 | 常驻前台服务 + 专用低频流；通知栏直接允许/拒绝；断线补发 | **33 KB** |
+| **dsh-pager（本项目）** | 插件（挂 /m）+ WebView 外壳 | 为手机重写的界面，服务端先折叠 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 常驻前台服务 + 专用低频流；通知栏直接允许/拒绝；断线补发 | **33 KB** |
 
 **我们的定位**：不是把桌面界面搬到手机上，而是做一个"寻呼机"。你锁屏时它替你盯着，需要你时叫你，点开就能处理。所以我们优先保证三件事：体积最小、流量最省、后台提醒最可靠。认证和隧道交给你已有的、更专业的工具。
 
 **目前的不足**：
-- 不内置认证和隧道。远程访问要你自己准备 VPN，或者带登录页的网关，见 [docs/remote-access.md](docs/remote-access.md)。
+- 不内置认证和隧道。你需要自己有一条连回家里电脑、带认证的通道：国内云服务器上的登录网关（作者自用，全程国内直连），或者异地组网工具。见 [docs/remote-access.md](docs/remote-access.md)。
 - 只有 Android 版。
 - 只覆盖 DSH 的常用功能：看会话、发消息（可带图）、停止、切模型、审批、回答提问、待办、排队消息。目标、计划模式、文件浏览、终端还没有。
 - 暂时只能连一台电脑（可以在 App 里切换地址）。
@@ -127,10 +127,12 @@ ln -s /path/to/dsh-pager/plugin ~/.dsh/profiles/web/node_modules/dsh-pager
 
 ### 2. 让手机能访问到
 
-DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。常见做法有两种，详见 [docs/remote-access.md](docs/remote-access.md)：
+DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。常见做法有两种，都不需要翻墙，详见 [docs/remote-access.md](docs/remote-access.md)：
 
-- **VPN**（Tailscale、WireGuard、ZeroTier 等）：手机和电脑连进同一个私有网络，再用自带的 [`tools/forward.mjs`](tools/forward.mjs) 把 DSH 转发到电脑的 VPN 地址上。它会拒绝监听公网地址和通配地址。
-- **带登录的网关**：在自己的服务器上放一个带登录页的反向代理（登录页 + Cookie 方式），再通过隧道连回家里电脑。作者自用的就是这种。
+- **带登录的网关（推荐，作者自用）**：在一台国内云服务器上放一个带登录页的反向代理（登录页 + Cookie 方式），再通过隧道（如 WireGuard）连回家里电脑。全程国内直连，手机上不用装任何额外软件。
+- **异地组网**（如 EasyTier、ZeroTier、Tailscale、自建 WireGuard）：把手机和电脑连进同一个私有网络，再用自带的 [`tools/forward.mjs`](tools/forward.mjs) 把 DSH 转发到电脑的组网地址上。它会拒绝监听公网地址和通配地址。
+  - 这类工具技术上也叫"VPN"，但作用只是把你自己的设备连在一起，和翻墙无关。
+  - 部分工具的协调服务器在海外，国内可能连不稳。想全程国内，就选能自建节点的方案。
 
 如果手机访问时用的地址不是回环地址，要在插件这一行加上 `trustedHosts`：
 
@@ -156,7 +158,7 @@ DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。
 
 ## 安全须知
 
-- **能在手机上发指令，就等于能让电脑执行命令**（受 DSH 自身审批策略约束）。所以远程通道必须有你信得过的认证：VPN，或带登录的网关。
+- **能在手机上发指令，就等于能让电脑执行命令**（受 DSH 自身审批策略约束）。所以远程通道必须有你信得过的认证：带登录的网关，或者只有你自己设备的异地组网。
 - dsh-pager 不开新端口，也不改变 DSH 的绑定地址，`/m/api/*` 沿用和 DSH 相同的 Host / Origin / 跨站检查。`trustedHosts` 里写错的条目会让插件在加载时直接报错，而不是悄悄放行。
 - App 本地只存服务器地址、网关 Cookie（如果有）和提醒序号；日志只记连接状态和帧类型，不记内容和凭据（`adb logcat -s DSHNotify`）。
 - 没有统计、没有第三方 SDK、不依赖 Google 服务；公开版 APK 关闭了 WebView 远程调试（1.2.1 起）。
@@ -175,7 +177,7 @@ bash android/build.sh public          # 编译 App（无 Gradle，需 Android SD
 ```
 plugin/     DSH 插件：index.js 挂载 · server.js 接口与实时桥 · fold.js 事件折叠 · notify.js 提醒中枢 · www/ 手机界面
 android/    App 外壳：MainActivity（WebView + 首次配置）· NotifyService（后台提醒）· BootReceiver · build.sh
-tools/      forward.mjs：把 DSH 转发到一个私有地址（VPN 用）
+tools/      forward.mjs：把 DSH 转发到一个私有地址（异地组网用）
 docs/       远程访问 · Android · DSH 协议笔记
 ```
 

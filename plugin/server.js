@@ -235,7 +235,7 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
 
   async function history(url) {
     const sessionId = url.searchParams.get('s')
-    if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400 })
+    if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400, code: 'bad-request' })
     const before = url.searchParams.get('before')
     const n = Math.min(100, Math.max(1, Number(url.searchParams.get('n')) || 30))
     const payload = { sessionId, maxMessages: n }
@@ -250,7 +250,7 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
 
   let wsCache = null
   async function rootOf(sessionId) {
-    if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400 })
+    if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400, code: 'bad-request' })
     if (!wsCache || Date.now() - wsCache.at > 10000) wsCache = { at: Date.now(), v: await value('workspace.list', {}) }
     const w = wsCache.v.items.find((x) => (x.sessionIds || []).includes(sessionId))
     if (!w || !w.path) throw Object.assign(new Error('这个对话不属于任何工作区，没有可查看的文件'), { status: 404, code: 'no-workspace' })
@@ -264,7 +264,7 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
     const seq = Number(url.searchParams.get('seq'))
     const rseqRaw = url.searchParams.get('rseq')
     const rseq = rseqRaw ? Number(rseqRaw) : NaN
-    if (!sessionId || !id || !Number.isFinite(seq)) throw Object.assign(new Error('missing s/id/seq'), { status: 400 })
+    if (!sessionId || !id || !Number.isFinite(seq)) throw Object.assign(new Error('missing s/id/seq'), { status: 400, code: 'bad-request' })
     const end = Number.isFinite(rseq) && rseq > seq ? rseq : seq
     for (const maxMessages of [1, 4]) {
       const v = await value('session.history', { sessionId, maxMessages, beforeSeq: end + 1 }, 90000)

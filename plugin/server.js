@@ -15,6 +15,10 @@
  *                            with Range support
  *   POST /m/api/rpc          allowlisted DSH unary call {method, payload}
  *   POST /m/api/respond      approval / question answer {rpcId, result}
+ *   GET  /m/api/push/key     Web Push: this server's public key + device count
+ *   POST /m/api/push/subscribe | unsubscribe | test
+ *                            register the installed web app (iPhone) for the
+ *                            same notices the Android app gets (see push.js)
  *
  * This module talks to DSH only through its public loopback wire protocol
  * (POST /api/<method>, WS /api/events.mux|host), exactly like DSH's own web
@@ -38,6 +42,7 @@ import { fileURLToPath } from 'node:url'
 import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue, fullCall, resultCallId } from './fold.js'
 import { NotifyHub } from './notify.js'
 import { confine, describe as describeFile, parseRange, MEDIA } from './files.js'
+import { WebPush, noticePayload } from './push.js'
 
 const WWW = path.join(path.dirname(fileURLToPath(import.meta.url)), 'www')
 
@@ -132,10 +137,10 @@ function readJson(req, limit) {
 }
 
 /**
- * @param {{ apiPort: () => number, log?: (msg: string) => void, trustedHosts?: string[] }} opts
+ * @param {{ apiPort: () => number, log?: (msg: string) => void, trustedHosts?: string[], pushDir?: string }} opts
  * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
  */
-export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
+export function createMobile({ apiPort, log = () => {}, trustedHosts = [], pushDir }) {
   // Fail the load loudly, as DSH does, rather than 403 every phone request later.
   const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
   if (badHost !== undefined) throw new Error(`dsh-pager: trustedHosts entry ${JSON.stringify(badHost)} is not a bare host[:port] authority`)
@@ -148,6 +153,13 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
   // still be binding its port) so notices are buffered even before a phone connects.
   const hub = new NotifyHub({ wsBase: () => `ws://127.0.0.1:${apiPort()}`, listSessions: () => value('session.list', {}), log })
   const hubTimer = setTimeout(() => hub.start(), 3000)
+
+  // Installed web apps (iPhone) get the same notices through Web Push.
+  const push = new WebPush({ dir: pushDir, log })
+  hub.onNotice((ev) => {
+    const n = noticePayload(ev)
+    if (n && push.list().length) push.broadcast(n.payload, n).catch((err) => log(`push failed: ${err && err.message}`))
+  })
 
   async function dsh(method, payload, timeoutMs = 30000, rpcId = crypto.randomUUID()) {
     const res = await fetch(`${base()}/api/${method}`, {
@@ -184,7 +196,7 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
       raw,
       gz: zlib.gzipSync(raw, { level: 9 }),
       etag: `"${crypto.createHash('sha1').update(raw).digest('base64url')}"`,
-      csp: `default-src 'self'; script-src 'sha256-${jsHash}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+      csp: `default-src 'self'; script-src 'sha256-${jsHash}'; worker-src 'self'; manifest-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
     }
     return shell
   }
@@ -205,7 +217,9 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
     if (!file.startsWith(WWW + path.sep) || !type || /(^|[\\/])app\.(js|css)$/.test(rel)) { res.writeHead(404); res.end(); return }
     fs.readFile(file, (err, buf) => {
       if (err) { res.writeHead(404); res.end(); return }
-      res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': 'public, max-age=86400' })
+      // The service worker and manifest must update with the plugin, not a day later.
+      const fresh = /^(sw\.js|manifest\.webmanifest)$/.test(rel)
+      res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': fresh ? 'no-cache' : 'public, max-age=86400' })
       res.end(buf)
     })
   }
@@ -349,6 +363,19 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
         return json(req, res, 200, await dsh(body.method, body.payload || {}, body.method === 'session.prompt' ? 180000 : 45000, rpcId))
       }
       if (route === 'respond' && isPost) return json(req, res, 200, { ok: true, value: await respond(await readJson(req, 1024 * 1024)) })
+      if (route === 'push/key' && !isPost) return json(req, res, 200, { ok: true, value: { publicKey: push.publicKey(), devices: push.list().length } })
+      if (route === 'push/subscribe' && isPost) {
+        const b = await readJson(req, 16 * 1024)
+        return json(req, res, 200, { ok: true, value: { devices: push.subscribe(b.subscription, b.label) } })
+      }
+      if (route === 'push/unsubscribe' && isPost) return json(req, res, 200, { ok: true, value: { removed: push.unsubscribe((await readJson(req, 16 * 1024)).endpoint) } })
+      if (route === 'push/test' && isPost) {
+        const { endpoint } = await readJson(req, 16 * 1024)
+        const sub = push.list().find((x) => x.endpoint === endpoint)
+        if (!sub) throw Object.assign(new Error('这台设备还没开启推送'), { status: 404, code: 'not-subscribed' })
+        const status = await push.sendTo(sub, { title: 'DSH 推送测试', body: '收到这条，说明锁屏提醒已经可以用了', tag: 'test' }, { urgency: 'high', ttl: 600 })
+        return json(req, res, 200, { ok: true, value: { status } })
+      }
       return json(req, res, 404, { ok: false, error: { code: 'not-found', message: route } })
     } catch (err) {
       const status = err.status || 502

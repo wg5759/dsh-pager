@@ -189,7 +189,15 @@
   }
 
   // ------------------------------------------------------------ api
-  function toLogin() { location.href = '/__login' }
+  // Reload and let the gateway run its own login flow (any gateway, any login
+  // URL). A second bounce within 15 s means the gateway keeps refusing: stop.
+  function toLogin() {
+    var last = 0
+    try { last = +sessionStorage.getItem('dsh.relogin') || 0 } catch (e) {}
+    if (Date.now() - last < 15000) { setStatus('offline'); toast('需要重新登录网关', 'err'); return }
+    try { sessionStorage.setItem('dsh.relogin', String(Date.now())) } catch (e) {}
+    location.reload()
+  }
   function handle(r) {
     if (r.type === 'opaqueredirect' || r.status === 401) { toLogin(); return Promise.reject(new Error('需要重新登录')) }
     if (r.status === 502 || r.status === 503 || r.status === 504) { setStatus('offline'); return Promise.reject(new Error('家里电脑暂时连不上')) }
@@ -1178,16 +1186,90 @@
   // Connection sheet: where this client points, reconnect, and (inside the
   // Android shell) switch to another server.
   var IN_APP = /DSHApp\//.test(navigator.userAgent)
+
+  // Web Push for the installed web app (iPhone: "Add to Home Screen", iOS
+  // 16.4+). The Android app has native notifications and skips all of this.
+  var STANDALONE = navigator.standalone === true || Boolean(window.matchMedia && matchMedia('(display-mode: standalone)').matches)
+  var IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1)
+  if (!IN_APP && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/m/sw.js', { scope: '/m/' }).catch(function () {})
+    navigator.serviceWorker.addEventListener('message', function (e) { if (e.data && e.data.t === 'open') window.dshOpen(e.data.s) })
+  }
+  function swReady() {
+    return Promise.race([navigator.serviceWorker.ready, new Promise(function (_, rej) { setTimeout(function () { rej(new Error('后台服务没有启动')) }, 5000) })])
+  }
+  function pushState() {
+    if (IN_APP) return Promise.resolve({ state: 'app' })
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return Promise.resolve({ state: IOS && !STANDALONE ? 'install' : 'unsupported' })
+    if (Notification.permission === 'denied') return Promise.resolve({ state: 'denied' })
+    return swReady().then(function (r) { return r.pushManager.getSubscription() }).then(function (sub) { return { state: sub ? 'on' : 'off', sub: sub } }, function () { return { state: 'unsupported' } })
+  }
+  function b64uBytes(s) {
+    var b = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)), a = new Uint8Array(b.length)
+    for (var i = 0; i < b.length; i++) a[i] = b.charCodeAt(i)
+    return a
+  }
+  function deviceLabel() { var u = navigator.userAgent; return /iPhone/.test(u) ? 'iPhone' : /iPad/.test(u) || IOS ? 'iPad' : /Android/.test(u) ? 'Android 浏览器' : '电脑浏览器' }
+  function enablePush() {
+    // requestPermission comes first, still inside the tap: iOS only asks from a user gesture.
+    return Notification.requestPermission().then(function (perm) {
+      if (perm !== 'granted') throw new Error(perm === 'denied' ? '通知权限被拒绝了，请在系统设置里允许' : '没有允许通知')
+      return Promise.all([swReady(), get('/m/api/push/key')])
+    }).then(function (x) {
+      return x[0].pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uBytes(x[1].publicKey) })
+    }).then(function (sub) {
+      return post('/m/api/push/subscribe', { subscription: sub.toJSON(), label: deviceLabel() })
+    })
+  }
+  function pushRows(st) {
+    function row(a, icon, title, sub, chev) {
+      return '<button class="opt-row"' + (a ? ' data-a="' + a + '"' : ' disabled') + '><span class="ico">' + ic(icon, 's') + '</span><span class="mid"><b>' + title + '</b><small>' + sub + '</small></span>' + (chev ? ic('chev', 's') : '') + '</button>'
+    }
+    switch (st.state) {
+      case 'install': return row('', 'alert', '锁屏提醒', '在 Safari 点“分享”→“添加到主屏幕”，从主屏幕打开后在这里开启')
+      case 'unsupported': return row('', 'alert', '锁屏提醒', '这个浏览器不支持网页推送')
+      case 'denied': return row('', 'alert', '锁屏提醒', '通知权限被拒绝了，请在系统设置里允许 DSH 通知')
+      case 'off': return row('push-on', 'alert', '开启锁屏提醒', '完成、出错、需要你确认时通知你', true)
+      case 'on': return row('push-test', 'checkc', '锁屏提醒已开启', '点这里发一条测试推送') + row('push-off', 'x', '关闭锁屏提醒', '这台设备不再收到推送')
+      default: return ''
+    }
+  }
   el.status.onclick = function () {
     openSheet('<div class="sh-h">连接<small>' + esc(location.host) + '</small></div><div class="sh-b">' +
       '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>重新连接</b><small>' +
       ({ online: '当前已连接', connecting: '正在连接…', offline: '电脑暂时连不上' })[S.status] + '</small></span></button>' +
       (IN_APP ? '<button class="opt-row" data-a="server"><span class="ico">' + ic('web', 's') + '</span><span class="mid"><b>切换服务器</b><small>换一台电脑，或换一个访问地址</small></span>' + ic('chev', 's') + '</button>' : '') +
-      '</div>')
+      '<div id="pushRows"></div></div>')
+    var cur = { state: 'app' }
+    function paintPush() {
+      pushState().then(function (st) {
+        cur = st
+        var box = document.getElementById('pushRows')
+        if (box) box.innerHTML = pushRows(st)
+      })
+    }
+    paintPush()
     el.sheet.onclick = function (e) {
       var b = e.target.closest('[data-a]')
-      if (!b) return
-      if (b.dataset.a === 'server') { location.href = 'dshapp://setup'; return }
+      if (!b || b.disabled) return
+      var a = b.dataset.a
+      if (a === 'server') { location.href = 'dshapp://setup'; return }
+      if (a === 'push-on') {
+        b.disabled = true
+        enablePush().then(function () { toast('已开启锁屏提醒'); buzz(); paintPush() }, function (err) { b.disabled = false; toast(err.message, 'err') })
+        return
+      }
+      if (a === 'push-test' && cur.sub) {
+        post('/m/api/push/test', { endpoint: cur.sub.endpoint }).then(function (v) {
+          toast(v.status >= 200 && v.status < 300 ? '已发出，几秒内锁屏应该收到' : '推送服务返回 ' + v.status, v.status >= 300 ? 'err' : '')
+        }, function (err) { toast(err.message, 'err') })
+        return
+      }
+      if (a === 'push-off' && cur.sub) {
+        var sub = cur.sub
+        post('/m/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(function () {}).then(function () { return sub.unsubscribe() }).then(function () { toast('已关闭锁屏提醒'); paintPush() }, function (err) { toast(err.message, 'err') })
+        return
+      }
       closeOverlay().then(function () { connect(); loadBoot().catch(function (err) { toast(err.message, 'err') }) })
     }
   }

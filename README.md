@@ -1,11 +1,11 @@
 # dsh-pager
 
-**DeepSeek Harness 的"寻呼机"**：一个 33 KB 的安卓 App，加一个 DSH 插件。
-人不在电脑前，也能看进度、发指令，并在通知栏里直接批准或拒绝。
+**DeepSeek Harness 的"寻呼机"**：一个 DSH 插件，加一个 33 KB 的安卓 App；iPhone 把网页添加到主屏幕即可。
+人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。
 
 > 非官方社区项目，与 DeepSeek 没有关联。· [English](#english)
 
-`MIT` · `Android 10+` · `DeepSeek Harness 0.1.x` · `Node.js 22+` · `dsh-plugin`
+`MIT` · `Android 10+` · `iOS 16.4+（网页版）` · `DeepSeek Harness 0.1.x` · `Node.js 22+` · `dsh-plugin`
 
 ---
 
@@ -22,16 +22,19 @@ dsh-pager 分别对应三件事：一套为手机重写的界面，在电脑上�
 ## 它是什么
 
 ```
-手机 · dsh-pager App（33 KB：WebView 外壳 + 常驻通知服务）
+安卓 · dsh-pager App（33 KB：WebView 外壳 + 常驻通知服务）
+iPhone · 同一个界面，Safari "添加到主屏幕"（网页推送做锁屏提醒）
    │   你已有的远程通道：国内云服务器上的登录网关，或异地组网（与翻墙无关）
    ▼
 DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
    └─ 插件 dsh-pager，挂在 /m
-        ├─ /m/                 手机界面（约 25 KB，放在电脑上：改完手机下拉刷新即生效）
+        ├─ /m/                 手机界面（约 30 KB，放在电脑上：改完手机下拉刷新即生效）
         ├─ /m/api/boot         工作区 + 会话列表（约 2 KB）
         ├─ /m/api/history      在电脑上折叠后的历史（4 MB 级 → 20–30 KB）
         ├─ /m/api/events       实时帧（流式文字每 90 ms 合并一次）
         ├─ /m/api/notify       后台提醒流（120 秒心跳，断线补发）
+        ├─ /m/api/call|fs|raw  结果查看器：完整 diff 和输出、工作区文件、图片视频（只读，限工作区内）
+        ├─ /m/api/push/*       iPhone 锁屏提醒（网页推送，端到端加密）
         └─ /m/api/rpc|respond  发消息 / 停止 / 换模型 / 审批 / 回答提问（白名单）
 ```
 
@@ -52,10 +55,12 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 
 ## 亮点
 
-- **真正的后台提醒**：通知走一条独立的低频流（120 秒一次心跳，比界面用的实时流省电得多），由前台服务托着，开机、App 升级后自动恢复，Wi-Fi 和流量互切时立即重连。
+- **真正的后台提醒**：通知走一条独立的低频流（120 秒一次心跳，比界面用的实时流省电得多），由前台服务托着，Wi-Fi 和流量互切时立即重连。
   - 任务完成、出错、Agent 提问、工具审批都会提醒；**审批可以直接在通知栏点"允许"或"拒绝"**，点通知会打开对应会话。
   - 断线期间漏掉的提醒按序号补发（6 小时内）；待处理的审批和提问，每次连上都会重发。
-  - 不依赖 Google 推送（FCM），国产系统（HyperOS、HarmonyOS）照样能用。
+  - 不依赖 Google 推送（FCM），国产系统（HyperOS、HarmonyOS）照样能用。开机、升级后自动恢复需要系统允许 App"自启动"（这两个系统默认不允许，见 [docs/android.md](docs/android.md)）。
+  - iPhone 走网页推送（iOS 16.4+），内容端到端加密，苹果的推送服务看不到内容。
+- **结果查看器**：在手机上看完整的改动对比（逐行 diff）和命令输出，浏览工作区里的文本、Markdown、图片、视频。只能看该对话所在工作区里的文件；密钥、证书、`.env`、名字带"密码"等的文件不显示，内容里有私钥的文件拒绝打开。
 - **省流量**：插件在电脑上把原始事件折叠成"用户消息 / 回复 / 每个工具一行 / 回合结束"，再压缩下发。
 - **界面热更新**：界面跑在电脑上，App 只是外壳。改完界面，手机下拉刷新就生效，不用重装。
 - **不增加暴露面**：挂在 DSH 自己的 web 服务上，不开新端口，DSH 仍只绑 127.0.0.1。
@@ -64,7 +69,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 - **不绑定通道**：走你已有的登录网关或异地组网，不内置第三方隧道或中继。流量不经过别人的服务器，用国内云服务器就能全程国内直连（作者自用的就是这样）。
 - **只用 DSH 公开的线协议**（`POST /api/<方法>`、`/api/events.*`），不依赖 DSH 内部模块，DSH 升级时不容易坏。
 - **小而可审计**：
-  - 服务端约 1,000 行原生 JS，零 npm 依赖；界面是原生 JS/CSS，无框架。
+  - 服务端约 1,600 行原生 JS，零 npm 依赖（网页推送的加密和签名也是用 Node 自带的 crypto 写的）；界面是原生 JS/CSS，无框架。
   - App 820 行 Java、无 Gradle，一条命令即可复现构建。
 
 ## 与同类项目对比
@@ -81,14 +86,14 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 | [dsh-remote-web-gateway](https://github.com/summer1238/dsh-remote-web-gateway) | 网关插件 | 网页 | Cloudflare Quick Tunnel | GitHub 登录 + 一次性配对 + 设备撤销 | 未提及 | 无 App |
 | [DSH Mobile (sorsama)](https://github.com/sorsama/deepseek-harness-mobile) | 原生 Compose App + dsh-relay 插件 | 原生，功能对齐 GUI | 局域网 / relay / 自有反代 | relay 配对 + 固定公钥 | 前台服务：回合完成、目标完成或受阻、审阅或提问等待 | 14.5 MB |
 | [dsh-remote-mobile](https://github.com/IceApriler/dsh-remote-mobile) | 安全网关插件 + 移动端样式 | 桌面界面 + 移动端 CSS | 局域网 / Tailscale | 扫码 + RSA + 防爆破 | 未提及 | 无 App |
-| **dsh-pager（本项目）** | 插件（挂 /m）+ WebView 外壳 | 为手机重写的界面，服务端先折叠 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 常驻前台服务 + 专用低频流；通知栏直接允许/拒绝；断线补发 | **33 KB** |
+| **dsh-pager（本项目）** | 插件（挂 /m）+ 安卓 WebView 外壳 + iPhone 网页 App | 为手机重写的界面，服务端先折叠；带结果查看器 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 安卓：常驻前台服务 + 专用低频流，通知栏直接允许/拒绝，断线补发；iPhone：网页推送 | **33 KB** |
 
 **我们的定位**：不是把桌面界面搬到手机上，而是做一个"寻呼机"。你锁屏时它替你盯着，需要你时叫你，点开就能处理。所以我们优先保证三件事：体积最小、流量最省、后台提醒最可靠。认证和隧道交给你已有的、更专业的工具。
 
 **目前的不足**：
 - 不内置认证和隧道。你需要自己有一条连回家里电脑、带认证的通道：国内云服务器上的登录网关（作者自用，全程国内直连），或者异地组网工具。见 [docs/remote-access.md](docs/remote-access.md)。
-- 只有 Android 版。
-- 只覆盖 DSH 的常用功能：看会话、发消息（可带图）、停止、切模型、审批、回答提问、待办、排队消息。目标、计划模式、文件浏览、终端还没有。
+- iPhone 是网页版（添加到主屏幕）：通知上不能直接批准，要点开进 App 处理；目前只在电脑浏览器上端到端验证过推送，真机 iPhone 还没测。
+- 只覆盖 DSH 的常用功能：看会话、发消息（可带图）、停止、切模型、审批、回答提问、待办、排队消息、看结果和工作区文件。目标、计划模式、终端还没有。
 - 暂时只能连一台电脑（可以在 App 里切换地址）。
 
 ## 快速开始
@@ -150,11 +155,14 @@ DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。
 
 首次打开会让你填服务器地址，例如 `https://pc.example.com:8443` 或 `100.64.0.5:8080`，填完即可使用。
 
-要收到后台提醒，还需要两个设置：
+要收到后台提醒，还需要三个设置：
 - 允许通知；
-- 把电池 / 省电策略设为"无限制"。HyperOS 默认的"智能限制"会在息屏后切断后台联网。
+- 把电池 / 省电策略设为"无限制"。HyperOS 默认的"智能限制"会在息屏后切断后台联网；
+- 允许"自启动"，否则手机重启或 App 升级后，要手动打开一次 App 才恢复提醒。
 
 以后想换地址，点界面顶部的连接状态，选"切换服务器"。
+
+**iPhone / iPad**（iOS 16.4+）：用 Safari 打开 `https://你的地址/m/` 并登录，点"分享"→"添加到主屏幕"，从主屏幕图标打开后，点连接状态 →"开启锁屏提醒"。详见 [docs/ios.md](docs/ios.md)。
 
 ## 安全须知
 
@@ -162,12 +170,15 @@ DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。
 - dsh-pager 不开新端口，也不改变 DSH 的绑定地址，`/m/api/*` 沿用和 DSH 相同的 Host / Origin / 跨站检查。`trustedHosts` 里写错的条目会让插件在加载时直接报错，而不是悄悄放行。
 - App 本地只存服务器地址、网关 Cookie（如果有）和提醒序号；日志只记连接状态和帧类型，不记内容和凭据（`adb logcat -s DSHNotify`）。
 - 没有统计、没有第三方 SDK、不依赖 Google 服务；公开版 APK 关闭了 WebView 远程调试（1.2.1 起）。
+- 结果查看器只读，且只能读该对话所在工作区里的文件（符号链接、目录联接指到外面的也会被拦住），并隐藏密钥类文件。它不会识别普通文档里写的密码。
+- iPhone 推送的签名密钥和设备列表保存在电脑上的 `~/.dsh-pager/`，不在代码仓库里。
 
 ## 开发
 
 ```bash
-cd plugin && npm test                 # 插件单测（27 项）
+cd plugin && npm test                 # 插件单测（43 项，含 RFC 8291 官方测试向量）
 node --test tools/*.test.mjs          # 转发器单测
+node tools/make-icons.mjs             # 重新生成网页 App 图标
 node plugin/dev.mjs                   # 独立开发服务器 http://127.0.0.1:3090/m/，直连本机 DSH，改服务端代码不用重启 DSH
 bash android/build.sh public          # 编译 App（无 Gradle，需 Android SDK build-tools 34 + JDK 17）
 ```
@@ -175,10 +186,11 @@ bash android/build.sh public          # 编译 App（无 Gradle，需 Android SD
 界面文件（`plugin/www/`）保存后即时生效；`index.js` / `server.js` / `fold.js` / `notify.js` 改动后需要重启 DSH。DSH 的线协议笔记见 [docs/dsh-protocol-notes.md](docs/dsh-protocol-notes.md)。
 
 ```
-plugin/     DSH 插件：index.js 挂载 · server.js 接口与实时桥 · fold.js 事件折叠 · notify.js 提醒中枢 · www/ 手机界面
+plugin/     DSH 插件：index.js 挂载 · server.js 接口与实时桥 · fold.js 事件折叠 · notify.js 提醒中枢
+            files.js 结果查看器（只读、限工作区）· push.js 网页推送 · www/ 手机界面、Service Worker、Web App 清单
 android/    App 外壳：MainActivity（WebView + 首次配置）· NotifyService（后台提醒）· BootReceiver · build.sh
-tools/      forward.mjs：把 DSH 转发到一个私有地址（异地组网用）
-docs/       远程访问 · Android · DSH 协议笔记
+tools/      forward.mjs 把 DSH 转发到一个私有地址（异地组网用）· make-icons.mjs 生成图标
+docs/       远程访问 · Android · iPhone · DSH 协议笔记
 ```
 
 ## 许可与声明

@@ -9,6 +9,8 @@
  */
 
 import http from 'node:http'
+import os from 'node:os'
+import path from 'node:path'
 import { createMobile } from './server.js'
 
 const PORT = Number(process.env.PORT || 3090)
@@ -16,7 +18,10 @@ const DSH_PORT = Number(process.env.DSH_PORT || 3080)
 
 const TRUSTED_HOSTS = (process.env.TRUSTED_HOSTS || '').split(',').map((h) => h.trim()).filter(Boolean)
 
-const mobile = createMobile({ apiPort: () => DSH_PORT, log: (m) => console.log(`[dsh-pager] ${m}`), trustedHosts: TRUSTED_HOSTS })
+// Its own push state: a dev server next to the live plugin must not push every notice twice.
+const PUSH_DIR = process.env.PUSH_DIR || path.join(os.homedir(), '.dsh-pager-dev')
+
+const mobile = createMobile({ apiPort: () => DSH_PORT, log: (m) => console.log(`[dsh-pager] ${m}`), trustedHosts: TRUSTED_HOSTS, pushDir: PUSH_DIR })
 
 http
   .createServer((req, res) => {

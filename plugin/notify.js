@@ -161,7 +161,15 @@ export class NotifyHub {
     this.buf.push(ev)
     if (this.buf.length > 200) this.buf.shift()
     for (const c of this.clients) c.send(ev)
+    for (const fn of this.listeners || []) { try { fn(ev) } catch (err) { this.log(`notice listener failed: ${err && err.message}`) } }
     return ev
+  }
+
+  /** Also deliver every notice to `fn` (Web Push); returns the unsubscribe. */
+  onNotice(fn) {
+    if (!this.listeners) this.listeners = new Set()
+    this.listeners.add(fn)
+    return () => this.listeners.delete(fn)
   }
 
   onMux(env) {

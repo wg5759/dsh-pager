@@ -1,0 +1,22 @@
+{
+  "name": "dsh-pager",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "DeepSeek Harness plugin: a fast mobile UI, folded low-traffic API and background alerts at /m, for the dsh-pager Android app.",
+  "keywords": ["dsh-plugin", "deepseek-harness", "mobile", "android", "notifications"],
+  "homepage": "https://github.com/wg5759/dsh-pager",
+  "repository": { "type": "git", "url": "git+https://github.com/wg5759/dsh-pager.git", "directory": "plugin" },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "dev": "node dev.mjs"
+  },
+  "dsh": {
+    "host": {}
+  },
+  "license": "MIT"
+}

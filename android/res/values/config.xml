@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Server preset for private builds. Leave empty in source: build.sh fills it
+      from DSH_DEFAULT_SERVER in local.properties (git-ignored). Empty means the
+      app asks for the address on first launch.
+    -->
+    <string name="default_server" translatable="false"></string>
+</resources>

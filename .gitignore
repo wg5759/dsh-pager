@@ -1,0 +1,16 @@
+# Signing key and its password. Never commit: every update must be signed with
+# the same key, and whoever holds it can ship "updates" to your phone.
+android/keystore/
+*.jks
+*.keystore
+
+# Private build settings (preset server address, local SDK paths)
+android/local.properties
+
+# Build outputs
+android/out/
+
+node_modules/
+*.log
+.DS_Store
+Thumbs.db

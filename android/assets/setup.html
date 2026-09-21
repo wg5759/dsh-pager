@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="light dark">
+<title>DSH</title>
+<style>
+  :root { --bg: #f5f6f8; --surface: #fff; --sunken: #eef0f3; --text: #16181d; --text2: #5c6370; --text3: #9aa0ab; --accent: #4d6bfe; --warn: #e08600; --bad: #e5484d; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0e1014; --surface: #171a20; --sunken: #1f232a; --text: #eceef2; --text2: #a4abb7; --text3: #6b7280; --accent: #6f87ff; --warn: #ffb224; --bad: #ff6369; } }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font: 15.5px/1.6 system-ui, sans-serif; }
+  main { max-width: 440px; margin: 0 auto; padding: 56px 24px 32px; }
+  .logo { width: 64px; height: 64px; border-radius: 20px; background: linear-gradient(135deg, #6f87ff, #3548da); display: grid; place-items: center; margin-bottom: 22px; }
+  .logo svg { width: 36px; height: 36px; fill: none; stroke: #fff; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+  h1 { font-size: 23px; margin: 0 0 6px; }
+  p.sub { margin: 0 0 26px; color: var(--text2); font-size: 14.5px; }
+  label { display: block; font-size: 13px; font-weight: 600; color: var(--text2); margin-bottom: 8px; }
+  input { width: 100%; height: 52px; padding: 0 16px; border: 0; outline: 0; border-radius: 16px; background: var(--surface); color: var(--text); font-size: 16px; box-shadow: 0 0 0 1.5px var(--sunken) inset; }
+  input:focus { box-shadow: 0 0 0 2px var(--accent) inset; }
+  button { width: 100%; height: 52px; margin-top: 16px; border: 0; border-radius: 16px; background: var(--accent); color: #fff; font: 600 16px system-ui, sans-serif; }
+  button:active { opacity: .85; }
+  .msg { min-height: 22px; margin-top: 10px; font-size: 13.5px; }
+  .msg.err { color: var(--bad); }
+  .msg.warn { color: var(--warn); }
+  .tips { margin-top: 22px; padding: 14px 16px; border-radius: 16px; background: var(--surface); font-size: 13.5px; color: var(--text2); }
+  .tips b { color: var(--text); font-weight: 600; }
+  .tips code { font-family: ui-monospace, monospace; font-size: 12.5px; background: var(--sunken); padding: 1px 6px; border-radius: 6px; }
+  .tips div + div { margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="logo"><svg viewBox="0 0 24 24"><path d="M6 8l4 4-4 4M13 17h5"/></svg></div>
+  <h1>连接你的 DSH</h1>
+  <p class="sub">填写电脑上 DeepSeek Harness 的访问地址。之后可以在 App 里随时更换。</p>
+  <form id="f" autocomplete="off" novalidate>
+    <label for="u">服务器地址</label>
+    <input id="u" type="text" inputmode="url" placeholder="https://dsh.example.com:8443" enterkeyhint="go" autocapitalize="off" spellcheck="false">
+    <div id="m" class="msg"></div>
+    <button type="submit">连接</button>
+  </form>
+  <div class="tips">
+    <div><b>通过 VPN</b>（Tailscale / WireGuard）：<code>http://100.x.y.z:8080</code></div>
+    <div><b>自建鉴权网关</b>：<code>https://你的域名:端口</code></div>
+    <div><b>同一局域网</b>：<code>http://192.168.x.x:8080</code></div>
+  </div>
+</main>
+<script>
+  var input = document.getElementById('u'), msg = document.getElementById('m')
+  var q = new URLSearchParams(location.search)
+  input.value = q.get('value') || q.get('current') || 'https://'
+  function showError(t) { msg.className = 'msg err'; msg.textContent = t }
+  input.oninput = function () {
+    var v = input.value.trim()
+    if (/^http:\/\//i.test(v) && !/^http:\/\/(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.)/i.test(v)) {
+      msg.className = 'msg warn'; msg.textContent = 'http 明文只适合 VPN 或局域网内使用；公网请用 https'
+    } else { msg.className = 'msg'; msg.textContent = '' }
+  }
+  document.getElementById('f').onsubmit = function (e) {
+    e.preventDefault()
+    var v = input.value.trim()
+    if (!v || v === 'https://' || v === 'http://') { showError('请先填写地址'); return }
+    location.href = 'dshapp://setup?server=' + encodeURIComponent(v)
+  }
+  input.oninput()
+  if (q.get('error')) showError('地址格式不对，例：https://dsh.example.com:8443')
+</script>
+</body>
+</html>

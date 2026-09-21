@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e1014" media="(prefers-color-scheme: dark)">
+<meta name="format-detection" content="telephone=no">
+<title>DSH</title>
+<link rel="icon" href="data:,">
+<!--CSS-->
+</head>
+<body>
+<div id="app">
+  <section id="home" class="page on" aria-label="对话列表">
+    <header class="bar">
+      <div class="brand"><span class="logo">DSH</span><span id="status" class="status"><i></i><em></em></span></div>
+      <button id="btnSearch" class="ib" data-ic="search" aria-label="搜索"></button>
+    </header>
+    <div id="searchBox" class="searchbox" hidden>
+      <span data-ic="search"></span><input id="q" type="search" placeholder="搜索对话标题" enterkeyhint="search" autocomplete="off"><button id="qClose" class="link">取消</button>
+    </div>
+    <nav id="chips" class="chips" aria-label="工作区"></nav>
+    <div id="list" class="scroll list">
+      <div id="ptr" class="ptr"><span data-ic="refresh"></span></div>
+      <div id="rows"></div>
+    </div>
+    <button id="fab" class="fab" data-ic="plus" aria-label="新对话"></button>
+  </section>
+
+  <section id="chat" class="page" aria-label="对话">
+    <header class="bar">
+      <button id="back" class="ib" data-ic="back" aria-label="返回"></button>
+      <button id="head" class="ttl"><b id="cTitle"></b><small id="cSub"></small></button>
+      <button id="more" class="ib" data-ic="more" aria-label="更多"></button>
+    </header>
+    <div id="scroller" class="scroll">
+      <div id="older"></div>
+      <div id="msgs" class="msgs"></div>
+      <div id="tail" class="msgs"></div>
+    </div>
+    <button id="toBottom" class="tobottom" data-ic="down" aria-label="回到底部" hidden></button>
+    <div id="dock" class="dock"></div>
+    <footer class="composer">
+      <div id="thumbs" class="thumbs" hidden></div>
+      <div class="crow">
+        <button id="attach" class="ib" data-ic="image" aria-label="添加图片"></button>
+        <textarea id="input" rows="1" placeholder="发消息给 DSH" enterkeyhint="enter"></textarea>
+        <button id="send" class="send" aria-label="发送"></button>
+      </div>
+      <input id="file" type="file" accept="image/*" multiple hidden>
+    </footer>
+  </section>
+
+  <div id="sheetWrap" class="sheet-wrap" hidden>
+    <div class="backdrop"></div>
+    <div id="sheet" class="sheet" role="dialog"></div>
+  </div>
+  <div id="viewer" class="viewer" hidden><img alt=""></div>
+  <div id="toast" class="toast" role="status"></div>
+</div>
+<!--JS-->
+</body>
+</html>

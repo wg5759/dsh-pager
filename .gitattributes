@@ -1,0 +1,5 @@
+# LF everywhere: build.sh breaks under bash with CRLF line endings.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.apk binary

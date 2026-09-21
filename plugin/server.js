@@ -1,0 +1,491 @@
+/**
+ * dsh-mobile HTTP surface, mounted at /m on the DSH web server.
+ *
+ *   GET  /m/                 phone app shell (index.html with CSS/JS inlined)
+ *   GET  /m/<asset>          other files under www/
+ *   GET  /m/api/boot         workspaces + compact session list (one round trip)
+ *   GET  /m/api/history      folded history page (see fold.js; ~1% of raw size)
+ *   GET  /m/api/events       SSE: compact live frames bridged from DSH's two
+ *                            WebSocket downlinks, text deltas coalesced
+ *   GET  /m/api/img          one session image attachment, immutable-cached
+ *   POST /m/api/rpc          allowlisted DSH unary call {method, payload}
+ *   POST /m/api/respond      approval / question answer {rpcId, result}
+ *
+ * This module talks to DSH only through its public loopback wire protocol
+ * (POST /api/<method>, WS /api/events.mux|host), exactly like DSH's own web
+ * client. It never imports DSH internals, so it runs unchanged both inside the
+ * DSH process (index.js) and as a standalone dev server (dev.mjs).
+ *
+ * Trust: /m/api/* applies the same DNS-rebinding / cross-site fence DSH uses
+ * for /api (loopback or `trustedHosts` Host, same-origin Origin, no cross-site
+ * Fetch metadata). It is not authentication: remote access must come through
+ * a VPN or an authenticating gateway (see docs/remote-access.md).
+ *
+ * Log lines are ASCII on purpose: DSH's stdout is appended by PowerShell,
+ * which mangles mixed encodings.
+ */
+
+import fs from 'node:fs'
+import path from 'node:path'
+import zlib from 'node:zlib'
+import crypto from 'node:crypto'
+import { fileURLToPath } from 'node:url'
+import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue } from './fold.js'
+import { NotifyHub } from './notify.js'
+
+const WWW = path.join(path.dirname(fileURLToPath(import.meta.url)), 'www')
+
+/** The only DSH methods a phone may invoke through /m/api/rpc. */
+const RPC_ALLOW = new Set([
+  'session.create', 'session.prompt', 'session.cancel', 'session.models', 'session.selectModel',
+  'session.rename', 'session.search', 'session.updateQueue', 'workspace.archiveSession',
+])
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+}
+
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]'])
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/**
+ * Canonical form of one `trustedHosts` entry, or null when it is not a bare
+ * `host` / `host:port` authority. Mirrors DSH's assertTrustedAuthority: an
+ * entry that URL parsing would silently rewrite (`user@host`, `host/path`, a
+ * dangling colon, a zero-padded port, unbracketed IPv6) is a typo that would
+ * change what it grants, so it is refused. `:80` and `:443` count as explicit.
+ * @param {unknown} entry
+ */
+export function canonicalTrustedHost(entry) {
+  if (typeof entry !== 'string') return null
+  let url
+  try { url = new URL(`http://${entry}`) } catch { return null }
+  const port = url.port !== '' ? url.port : new URL(`https://${entry}`).port
+  const canon = port === '' ? url.hostname : `${url.hostname}:${port}`
+  return canon === entry.toLowerCase() ? canon : null
+}
+
+/**
+ * Same fence as DSH's isTrustedApiRequest: the Host must be loopback or one of
+ * the deployment's `trustedHosts` (exact `host:port`, or a port-less `host`
+ * matching any port), and any browser Origin must be same-host.
+ * @param {import('node:http').IncomingMessage} req
+ * @param {string[]} [trustedHosts]
+ */
+export function trusted(req, trustedHosts = []) {
+  const host = req.headers.host
+  if (!host) return false
+  let hostUrl
+  try { hostUrl = new URL(`http://${host}`) } catch { return false }
+  const listed = trustedHosts.some((entry) => {
+    const canon = canonicalTrustedHost(entry)
+    if (canon === null) return false
+    const e = new URL(`http://${canon}`)
+    return canon === e.hostname ? e.hostname === hostUrl.hostname : e.host === hostUrl.host
+  })
+  if (!LOOPBACK.has(hostUrl.hostname) && !listed) return false
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false
+  const origin = req.headers.origin
+  if (origin === undefined) return true
+  try { return new URL(origin).host === hostUrl.host } catch { return false }
+}
+
+function acceptsGzip(req) {
+  return /\bgzip\b/.test(req.headers['accept-encoding'] || '')
+}
+
+function json(req, res, status, obj) {
+  let body = Buffer.from(JSON.stringify(obj))
+  const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }
+  if (body.length > 1024 && acceptsGzip(req)) {
+    body = zlib.gzipSync(body, { level: 6 })
+    headers['content-encoding'] = 'gzip'
+    headers.vary = 'accept-encoding'
+  }
+  headers['content-length'] = body.length
+  res.writeHead(status, headers)
+  res.end(body)
+}
+
+function readJson(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0
+    const chunks = []
+    req.on('data', (c) => {
+      size += c.length
+      if (size > limit) { reject(Object.assign(new Error('body too large'), { status: 413 })); req.destroy(); return }
+      chunks.push(c)
+    })
+    req.on('end', () => {
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) } catch { reject(Object.assign(new Error('bad json'), { status: 400 })) }
+    })
+    req.on('error', reject)
+  })
+}
+
+/**
+ * @param {{ apiPort: () => number, log?: (msg: string) => void, trustedHosts?: string[] }} opts
+ * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
+ */
+export function createMobile({ apiPort, log = () => {}, trustedHosts = [] }) {
+  // Fail the load loudly, as DSH does, rather than 403 every phone request later.
+  const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
+  if (badHost !== undefined) throw new Error(`dsh-pager: trustedHosts entry ${JSON.stringify(badHost)} is not a bare host[:port] authority`)
+  const bridges = new Set()
+  let shell = null
+
+  const base = () => `http://127.0.0.1:${apiPort()}`
+
+  // Always-on watcher behind /m/api/notify. Started shortly after load (DSH may
+  // still be binding its port) so notices are buffered even before a phone connects.
+  const hub = new NotifyHub({ wsBase: () => `ws://127.0.0.1:${apiPort()}`, listSessions: () => value('session.list', {}), log })
+  const hubTimer = setTimeout(() => hub.start(), 3000)
+
+  async function dsh(method, payload, timeoutMs = 30000, rpcId = crypto.randomUUID()) {
+    const res = await fetch(`${base()}/api/${method}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    if (!res.ok) throw Object.assign(new Error(`DSH ${method} HTTP ${res.status}`), { status: 502, code: `http-${res.status}` })
+    return (await res.json()).result
+  }
+
+  async function value(method, payload, timeoutMs) {
+    const r = await dsh(method, payload, timeoutMs)
+    if (!r || !r.ok) throw Object.assign(new Error((r && r.error && r.error.message) || `${method} failed`), { status: 502, code: r && r.error && r.error.code })
+    return r.value
+  }
+
+  // ---- static -------------------------------------------------------------
+
+  /** index.html with app.css/app.js inlined; rebuilt only when a file changes. */
+  function buildShell() {
+    const files = ['index.html', 'app.css', 'app.js'].map((f) => path.join(WWW, f))
+    const key = files.map((f) => { const s = fs.statSync(f); return `${s.mtimeMs}:${s.size}` }).join('|')
+    if (shell && shell.key === key) return shell
+    const [html, css, js] = files.map((f) => fs.readFileSync(f, 'utf8'))
+    const jsHash = crypto.createHash('sha256').update(js).digest('base64')
+    // Replacement functions, not strings: app.js contains `$` sequences that
+    // String.replace would otherwise interpret as substitution patterns.
+    const out = html.replace('<!--CSS-->', () => `<style>${css}</style>`).replace('<!--JS-->', () => `<script>${js}</script>`)
+    const raw = Buffer.from(out)
+    shell = {
+      key,
+      raw,
+      gz: zlib.gzipSync(raw, { level: 9 }),
+      etag: `"${crypto.createHash('sha1').update(raw).digest('base64url')}"`,
+      csp: `default-src 'self'; script-src 'sha256-${jsHash}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+    }
+    return shell
+  }
+
+  function serveShell(req, res) {
+    const s = buildShell()
+    const headers = { etag: s.etag, 'cache-control': 'no-cache', 'content-security-policy': s.csp, vary: 'accept-encoding', 'referrer-policy': 'no-referrer' }
+    if (req.headers['if-none-match'] === s.etag) { res.writeHead(304, headers); res.end(); return }
+    const gz = acceptsGzip(req)
+    const body = gz ? s.gz : s.raw
+    res.writeHead(200, { ...headers, 'content-type': MIME['.html'], 'content-length': body.length, ...(gz ? { 'content-encoding': 'gzip' } : {}) })
+    res.end(req.method === 'HEAD' ? undefined : body)
+  }
+
+  function serveAsset(rel, req, res) {
+    const file = path.resolve(WWW, rel)
+    const type = MIME[path.extname(file).toLowerCase()]
+    if (!file.startsWith(WWW + path.sep) || !type || /(^|[\\/])app\.(js|css)$/.test(rel)) { res.writeHead(404); res.end(); return }
+    fs.readFile(file, (err, buf) => {
+      if (err) { res.writeHead(404); res.end(); return }
+      res.writeHead(200, { 'content-type': type, 'content-length': buf.length, 'cache-control': 'public, max-age=86400' })
+      res.end(buf)
+    })
+  }
+
+  // ---- api ----------------------------------------------------------------
+
+  async function boot() {
+    const [ws, sl] = await Promise.all([value('workspace.list', {}), value('session.list', {})])
+    const archived = new Set(ws.archivedSessionIds || [])
+    const owner = new Map()
+    for (const w of ws.items) for (const id of w.sessionIds) owner.set(id, w.workspaceId)
+    const sessions = []
+    const blanks = {}
+    for (const s of sl.items) {
+      if (s.origin === 'subagent' || archived.has(s.sessionId)) continue
+      const w = owner.get(s.sessionId) || null
+      if (s.blank) { if (w && !blanks[w] && !s.running) blanks[w] = s.sessionId; continue }
+      const v = (s.projections && s.projections.values) || {}
+      sessions.push({ id: s.sessionId, title: typeof v.title === 'string' ? v.title : '', at: s.updatedAt, run: s.running, w })
+    }
+    return {
+      workspaces: ws.items.map((w) => ({ id: w.workspaceId, title: w.title, path: w.path })),
+      sessions,
+      blanks,
+    }
+  }
+
+  async function history(url) {
+    const sessionId = url.searchParams.get('s')
+    if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400 })
+    const before = url.searchParams.get('before')
+    const n = Math.min(100, Math.max(1, Number(url.searchParams.get('n')) || 30))
+    const payload = { sessionId, maxMessages: n }
+    if (before !== null && before !== '') payload.beforeSeq = Number(before)
+    const v = await value('session.history', payload, 90000)
+    const f = foldHistory(v.events)
+    const pv = (v.projections && v.projections.values) || {}
+    return { ...f, hasMore: Boolean(v.hasMore), title: f.title || (typeof pv.title === 'string' ? pv.title : undefined) }
+  }
+
+  async function image(url, req, res) {
+    const v = await value('session.attachment', { sessionId: url.searchParams.get('s'), attachmentId: url.searchParams.get('id') }, 60000)
+    const buf = Buffer.from(v.data, 'base64')
+    res.writeHead(200, { 'content-type': v.attachment.mediaType, 'content-length': buf.length, 'cache-control': 'private, max-age=31536000, immutable' })
+    res.end(buf)
+  }
+
+  async function respond(body) {
+    if (typeof body.rpcId !== 'string' || !body.result || typeof body.result.ok !== 'boolean') throw Object.assign(new Error('bad respond body'), { status: 400 })
+    const res = await fetch(`${base()}/api/respond`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-response', rpcId: body.rpcId, result: body.result }),
+      signal: AbortSignal.timeout(30000),
+    })
+    if (!res.ok) throw Object.assign(new Error(`respond HTTP ${res.status}`), { status: 502 })
+    return res.json()
+  }
+
+  async function api(route, url, req, res) {
+    const isPost = req.method === 'POST'
+    if (isPost && !/^application\/json\b/.test(req.headers['content-type'] || '')) return json(req, res, 415, { ok: false, error: { code: 'bad-content-type', message: 'application/json required' } })
+    try {
+      if (route === 'ping' && !isPost) return json(req, res, 200, { ok: true, t: Date.now() })
+      if (route === 'boot' && !isPost) return json(req, res, 200, { ok: true, value: await boot() })
+      if (route === 'history' && !isPost) return json(req, res, 200, { ok: true, value: await history(url) })
+      if (route === 'img' && !isPost) return await image(url, req, res)
+      if (route === 'events' && !isPost) return events(req, res)
+      if (route === 'notify' && !isPost) {
+        const since = url.searchParams.get('since')
+        return hub.subscribe(req, res, { since: since === null ? undefined : Number(since), epoch: url.searchParams.get('epoch') || undefined, hb: Number(url.searchParams.get('hb')) || 120 })
+      }
+      if (route === 'rpc' && isPost) {
+        const body = await readJson(req, 48 * 1024 * 1024)
+        if (!RPC_ALLOW.has(body.method)) return json(req, res, 400, { ok: false, error: { code: 'method-not-allowed', message: String(body.method) } })
+        // A caller-minted rpcId comes back as user/message source.rpcId, which is
+        // how the phone reconciles its optimistic "sending" bubble.
+        const rpcId = typeof body.rpcId === 'string' && UUID.test(body.rpcId) ? body.rpcId : undefined
+        if (body.method === 'session.prompt' && body.payload) hub.markPhone(body.payload.sessionId)
+        return json(req, res, 200, await dsh(body.method, body.payload || {}, body.method === 'session.prompt' ? 180000 : 45000, rpcId))
+      }
+      if (route === 'respond' && isPost) return json(req, res, 200, { ok: true, value: await respond(await readJson(req, 1024 * 1024)) })
+      return json(req, res, 404, { ok: false, error: { code: 'not-found', message: route } })
+    } catch (err) {
+      const status = err.status || 502
+      if (status >= 500) log(`api ${route} failed: ${err.message}`)
+      if (!res.headersSent) json(req, res, status, { ok: false, error: { code: err.code || (err.name === 'TimeoutError' ? 'timeout' : 'upstream'), message: err.message } })
+      else res.end()
+    }
+  }
+
+  function events(req, res) {
+    res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' })
+    res.write('retry: 2000\n\n')
+    const b = new Bridge(res, `ws://127.0.0.1:${apiPort()}`, log, () => bridges.delete(b))
+    bridges.add(b)
+    req.on('close', () => b.close())
+  }
+
+  async function handle(req, res) {
+    try {
+      const url = new URL(req.url || '/', 'http://local')
+      const p = url.pathname
+      if (p === '/m') { res.writeHead(308, { location: '/m/' + url.search }); res.end(); return }
+      if (p === '/m/' || p === '/m/index.html') return serveShell(req, res)
+      if (p.startsWith('/m/api/')) {
+        if (!trusted(req, trustedHosts)) return json(req, res, 403, { ok: false, error: { code: 'forbidden', message: 'untrusted request' } })
+        return await api(p.slice(7), url, req, res)
+      }
+      return serveAsset(decodeURIComponent(p.slice(3)), req, res)
+    } catch (err) {
+      log(`handler error: ${err && err.message}`)
+      if (!res.headersSent) { res.writeHead(500); res.end() } else res.end()
+    }
+  }
+
+  function close() {
+    clearTimeout(hubTimer)
+    hub.stop()
+    for (const b of [...bridges]) b.close()
+  }
+
+  return { handle, close }
+}
+
+/**
+ * One phone connection: DSH mux + host WebSockets in, compact SSE frames out.
+ *
+ * Text deltas are buffered per session and flushed every ~90 ms as
+ * [seq, text] pairs (a raw chunk frame is ~250 bytes for a few characters);
+ * the per-part seq lets the phone drop exactly the parts its history page
+ * already contained. Any non-delta frame for a session flushes that
+ * session's buffer first, so ordering is preserved.
+ *
+ * Upstream loss ends the SSE response; the phone's EventSource reconnects,
+ * and the fresh mux replays still-pending approvals/questions.
+ */
+class Bridge {
+  constructor(res, wsBase, log, onClose) {
+    this.res = res
+    this.log = log
+    this.onClose = onClose
+    this.closed = false
+    this.pending = new Map()
+    this.timer = null
+    this.toolSeen = new Map()
+    this.turnAt = new Map()
+    this.calls = new Map()
+    this.sockets = [
+      this.open(`${wsBase}/api/events.mux`, (env) => this.onMux(env)),
+      this.open(`${wsBase}/api/events.host`, (env) => this.onHost(env)),
+    ]
+    // A data frame, not an SSE comment: EventSource hides comments from script,
+    // and the phone's stall watchdog needs to see the heartbeat.
+    this.ping = setInterval(() => this.send({ t: 'p' }), 15000)
+    this.send({ t: 'hello', at: Date.now() })
+  }
+
+  open(url, onEnvelope) {
+    const ws = new WebSocket(url)
+    ws.onmessage = (ev) => {
+      try { onEnvelope(JSON.parse(ev.data)) } catch (err) { this.log(`bridge frame error: ${err && err.message}`) }
+    }
+    ws.onerror = () => {}
+    ws.onclose = () => this.close()
+    return ws
+  }
+
+  write(s) {
+    if (this.closed) return
+    try { this.res.write(s) } catch { this.close() }
+  }
+
+  send(obj) {
+    this.write(`data: ${JSON.stringify(obj)}\n\n`)
+  }
+
+  delta(s, seq, text) {
+    let q = this.pending.get(s)
+    if (!q) this.pending.set(s, (q = []))
+    q.push([seq, text])
+    if (!this.timer) this.timer = setTimeout(() => { this.timer = null; for (const id of [...this.pending.keys()]) this.flush(id) }, 90)
+  }
+
+  flush(s) {
+    const q = this.pending.get(s)
+    if (!q) return
+    this.pending.delete(s)
+    if (q.length) this.send({ t: 'd', s, p: q })
+  }
+
+  remember(item) {
+    this.calls.set(item.id, { title: item.title, detail: item.detail })
+    if (this.calls.size > 200) this.calls.delete(this.calls.keys().next().value)
+  }
+
+  onMux(env) {
+    const f = env && env.payload
+    if (!f) return
+    const s = f.sessionId
+    switch (f.type) {
+      case 'session/event': return this.onEvent(s, f.event, f.view)
+      case 'approval/requested':
+        this.flush(s)
+        return this.send({ t: 'ask', s, rpc: env.rpcId, id: f.approvalId, tool: f.toolName, call: f.callId, why: f.reason, ...(this.calls.get(f.callId) || {}) })
+      case 'approval/resolved': return this.send({ t: 'askDone', s, id: f.approvalId, outcome: f.outcome })
+      case 'question/requested': this.flush(s); return this.send({ t: 'q', s, rpc: env.rpcId, qs: f.questions })
+      case 'question/resolved': return this.send({ t: 'qDone', s, rpc: f.questionRpcId, outcome: f.outcome })
+      case 'session/queue': return this.send({ t: 'queue', s, items: foldQueue(f.items) })
+      case 'session/projection':
+        if (f.key === 'title' && typeof f.value === 'string') this.send({ t: 'title', s, title: f.value })
+        return
+      case 'stream/error': return this.send({ t: 'err', msg: f.error && f.error.message })
+    }
+  }
+
+  onEvent(s, e, view) {
+    if (!e) return
+    switch (e.type) {
+      case 'assistant/chunk': {
+        const c = e.data && e.data.chunk
+        if (!c) return
+        if (c.type === 'text-delta') return this.delta(s, e.seq, c.text)
+        if (c.type === 'block-start' && c.blockType === 'reasoning') { this.flush(s); return this.send({ t: 'think', s, seq: e.seq }) }
+        if (c.type === 'tool-call-delta' && c.name && c.id) {
+          let seen = this.toolSeen.get(s)
+          if (!seen) this.toolSeen.set(s, (seen = new Set()))
+          if (seen.has(c.id)) return
+          seen.add(c.id)
+          this.flush(s)
+          return this.send({ t: 'tooling', s, seq: e.seq, name: c.name })
+        }
+        return
+      }
+      case 'user/message': {
+        const it = foldUser(e)
+        if (!it) return
+        this.flush(s)
+        return this.send({ t: 'item', s, it })
+      }
+      case 'assistant/message': this.flush(s); return this.send({ t: 'final', s, seq: e.seq, it: foldAssistant(e) })
+      case 'step/start': this.flush(s); return this.send({ t: 'step', s, seq: e.seq })
+      case 'tool/call': {
+        if (e.data && e.data.name === 'todo_write') return
+        this.flush(s)
+        const it = foldCall(e, view)
+        this.remember(it)
+        return this.send({ t: 'item', s, it })
+      }
+      case 'tool/result': this.flush(s); return this.send({ t: 'result', s, seq: e.seq, ...foldResult(e, view) })
+      case 'turn/start': this.turnAt.set(s, e.time); return this.send({ t: 'turn', s, seq: e.seq })
+      case 'turn/end': {
+        this.flush(s)
+        this.toolSeen.delete(s)
+        const at = this.turnAt.get(s)
+        this.turnAt.delete(s)
+        return this.send({ t: 'item', s, it: { k: 'end', seq: e.seq, reason: (e.data && e.data.reason && e.data.reason.kind) || 'completed', ms: at !== undefined ? e.time - at : undefined } })
+      }
+      case 'session/title': return this.send({ t: 'title', s, title: e.data && e.data.title })
+      case 'todo/write': return this.send({ t: 'todo', s, todos: e.data && e.data.todos })
+    }
+  }
+
+  onHost(env) {
+    const f = env && env.payload
+    if (!f) return
+    switch (f.type) {
+      case 'host/session-status': return this.send({ t: 'run', s: f.sessionId, on: f.running })
+      case 'host/agent-error': return this.send({ t: 'agentErr', s: f.sessionId, msg: f.message })
+      case 'host/session-added':
+      case 'host/session-removed':
+      case 'host/workspace-changed':
+      case 'host/workspace-removed':
+      case 'host/workspace-order-changed':
+      case 'host/archived-sessions-changed':
+        return this.send({ t: 'list' })
+    }
+  }
+
+  close() {
+    if (this.closed) return
+    this.closed = true
+    clearInterval(this.ping)
+    clearTimeout(this.timer)
+    for (const ws of this.sockets) { try { ws.close() } catch {} }
+    try { this.res.end() } catch {}
+    this.onClose()
+  }
+}

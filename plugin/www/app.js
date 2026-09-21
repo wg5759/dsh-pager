@@ -1,0 +1,1191 @@
+'use strict'
+/*
+ * DSH phone client. Plain DOM, no framework, no build step.
+ *
+ * Data flow
+ *   GET  /m/api/boot     -> workspaces + session list
+ *   GET  /m/api/history  -> folded messages for one session (see fold.js)
+ *   SSE  /m/api/events   -> live frames for every session (deltas, tool rows,
+ *                           run status, approvals, questions, queue, todos)
+ *   POST /m/api/rpc      -> prompt / cancel / create / models / rename ...
+ *   POST /m/api/respond  -> approval & question answers
+ *
+ * Every live frame carries the session event seq; a chat drops frames its
+ * history page already contained (seq <= lastSeq), so "load history, then keep
+ * streaming" never duplicates or loses text.
+ */
+;(function () {
+  // ------------------------------------------------------------ utilities
+  var $ = function (s) { return document.querySelector(s) }
+  var ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return ESC[c] }) }
+  function enc(s) { return encodeURIComponent(s) }
+  function pad(n) { return (n < 10 ? '0' : '') + n }
+  function uuid() {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID()
+    var b = crypto.getRandomValues(new Uint8Array(16))
+    b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128
+    var h = Array.prototype.map.call(b, function (x) { return (x + 256).toString(16).slice(1) }).join('')
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20)
+  }
+  function buzz(ms) { try { if (navigator.vibrate) navigator.vibrate(ms || 10) } catch (e) {} }
+  var TZ = (function () { try { return Intl.DateTimeFormat().resolvedOptions().timeZone } catch (e) { return undefined } })()
+  var store = {
+    get: function (k, d) { try { var v = localStorage.getItem('dsh.' + k); return v == null ? d : JSON.parse(v) } catch (e) { return d } },
+    set: function (k, v) { try { localStorage.setItem('dsh.' + k, JSON.stringify(v)) } catch (e) {} },
+  }
+
+  function when(t) {
+    var now = new Date(), d = new Date(t), diff = now - d
+    if (diff < 60e3) return '刚刚'
+    if (diff < 3600e3) return Math.floor(diff / 60e3) + '分钟前'
+    var hm = pad(d.getHours()) + ':' + pad(d.getMinutes())
+    var day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    if (t >= day0) return hm
+    if (t >= day0 - 864e5) return '昨天 ' + hm
+    if (d.getFullYear() === now.getFullYear()) return (d.getMonth() + 1) + '月' + d.getDate() + '日'
+    return d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate()
+  }
+  function bucket(t) {
+    var now = new Date(), day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+    if (t >= day0) return 1
+    if (t >= day0 - 864e5) return 2
+    if (t >= day0 - 6 * 864e5) return 3
+    return 4
+  }
+  function dur(ms) {
+    var s = Math.round(ms / 1000)
+    if (s < 60) return s + '秒'
+    var m = Math.floor(s / 60)
+    if (m < 60) return m + '分' + (s % 60 ? (s % 60) + '秒' : '')
+    return Math.floor(m / 60) + '小时' + (m % 60 ? (m % 60) + '分' : '')
+  }
+
+  // ------------------------------------------------------------ icons
+  var P = {
+    search: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    back: '<path d="M15 18l-6-6 6-6"/>',
+    more: '<g fill="currentColor" stroke="none"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></g>',
+    send: '<path d="M12 19V5M5.5 11.5L12 5l6.5 6.5"/>',
+    stop: '<rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" stroke="none"/>',
+    image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="1.8"/><path d="M21 16l-5.2-5.2a1.5 1.5 0 0 0-2.1 0L5 19.5"/>',
+    x: '<path d="M18 6L6 18M6 6l12 12"/>',
+    check: '<path d="M20 6L9 17l-5-5"/>',
+    chev: '<path d="M9 6l6 6-6 6"/>',
+    down: '<path d="M12 5v14M5.5 12.5L12 19l6.5-6.5"/>',
+    refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
+    execute: '<path d="M4 17l6-5-6-5M12 19h8"/>',
+    read: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h4"/>',
+    edit: '<path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3zM14.5 7.5l3 3"/>',
+    web: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    agent: '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13v1.5M15 13v1.5"/>',
+    other: '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.2L4 16.8V20h3.2l5.3-5.3a4 4 0 0 0 5.2-5.4l-2.6 2.6-2.4-.6-.6-2.4z"/>',
+    delete: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+    alert: '<path d="M12 3l9.5 17h-19zM12 10v4M12 17.5v.5"/>',
+    cpu: '<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+    folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/>',
+    pen: '<path d="M4 20h4L19.5 8.5a2.1 2.1 0 0 0-3-3L5 17v3z"/>',
+    archive: '<rect x="3" y="4" width="18" height="5" rx="1.5"/><path d="M5 9v9a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9M10 13h4"/>',
+    circle: '<circle cx="12" cy="12" r="8"/>',
+    dotc: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>',
+    checkc: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/>',
+    xc: '<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',
+    bulb: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
+  }
+  function ic(n, cls) { return '<svg class="i' + (cls ? ' ' + cls : '') + '" viewBox="0 0 24 24" aria-hidden="true">' + (P[n] || P.other) + '</svg>' }
+  var KI = { execute: 'execute', read: 'read', edit: 'edit', search: 'search', web: 'web', fetch: 'web', agent: 'agent', delete: 'delete', move: 'edit', think: 'bulb', other: 'other' }
+  function toolLabel(name) {
+    if (!name) return '工具'
+    if (/^mcp__chrome__/.test(name)) return '浏览器'
+    return ({ pwsh: '终端', bash: '终端', read: '读取文件', read_image: '看图片', write: '写文件', edit: '编辑文件', grep: '搜索', glob: '找文件', web_search: '联网搜索', web_fetch: '打开网页', subagent: '子代理', todo_write: '更新进度' })[name] || name
+  }
+
+  // ------------------------------------------------------------ markdown
+  // Escape first, then add a closed set of constructs; raw HTML never passes.
+  var LI = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/
+  function inline(s) {
+    var codes = []
+    s = String(s).replace(/`([^`]+)`/g, function (_, c) { codes.push(c); return '' + (codes.length - 1) + '' })
+    s = esc(s)
+    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, function (_, t, u) { return '<a href="' + u + '">' + t + '</a>' })
+    s = s.replace(/(^|[\s(（：:，,])(https?:\/\/[^\s<>()（）]+[^\s<>()（）.,;:!?。，；：！？'"])/g, function (_, p, u) { return p + '<a href="' + u + '">' + u + '</a>' })
+    s = s.replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<b>$1</b>')
+    s = s.replace(/(^|[^*\w])\*(?=\S)([^*]*?\S)\*(?![*\w])/g, '$1<i>$2</i>')
+    s = s.replace(/~~(?=\S)([^~]*?\S)~~/g, '<s>$1</s>')
+    return s.replace(/(\d+)/g, function (_, n) { return '<code>' + esc(codes[n]) + '</code>' })
+  }
+  function table(rows) {
+    function cells(r) { return r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim() }) }
+    var head = cells(rows[0])
+    var body = rows.slice(2).map(cells)
+    return '<div class="tbl"><table><thead><tr>' + head.map(function (c) { return '<th>' + inline(c) + '</th>' }).join('') + '</tr></thead><tbody>' +
+      body.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + inline(c) + '</td>' }).join('') + '</tr>' }).join('') + '</tbody></table></div>'
+  }
+  function list(lines) {
+    var html = '', stack = []
+    lines.forEach(function (line) {
+      var m = LI.exec(line)
+      if (!m) { html += '<br>' + inline(line.trim()); return }
+      var ind = m[1].replace(/\t/g, '    ').length, tag = /\d/.test(m[2]) ? 'ol' : 'ul', text = m[3]
+      while (stack.length && ind < stack[stack.length - 1].ind) html += '</li></' + stack.pop().tag + '>'
+      var top = stack[stack.length - 1]
+      if (!top || ind > top.ind) { html += '<' + tag + '><li>'; stack.push({ ind: ind, tag: tag }) } else html += '</li><li>'
+      var ck = /^\[( |x|X)\]\s+/.exec(text)
+      if (ck) { html += '<span class="ck">' + (ck[1] === ' ' ? '☐' : '☑') + '</span> '; text = text.slice(ck[0].length) }
+      html += inline(text)
+    })
+    while (stack.length) html += '</li></' + stack.pop().tag + '>'
+    return html
+  }
+  function md(src) {
+    var L = String(src || '').replace(/\r\n?/g, '\n').split('\n'), out = '', para = [], i = 0, m
+    function flush() { if (para.length) { out += '<p>' + para.map(inline).join('<br>') + '</p>'; para = [] } }
+    while (i < L.length) {
+      var l = L[i]
+      if ((m = /^\s*(`{3,}|~{3,})\s*([^\s`]*)/.exec(l))) {
+        flush()
+        var fence = m[1], lang = m[2], buf = []
+        i++
+        while (i < L.length && L[i].trim().indexOf(fence) !== 0) buf.push(L[i++])
+        i++
+        out += '<pre class="code"><div class="code-h"><span>' + esc(lang || 'code') + '</span><button data-copy>复制</button></div><code>' + esc(buf.join('\n')) + '</code></pre>'
+        continue
+      }
+      if (!l.trim()) { flush(); i++; continue }
+      if (/^\s*\|.*\|\s*$/.test(l) && i + 1 < L.length && /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(L[i + 1])) {
+        flush()
+        var rows = []
+        while (i < L.length && /^\s*\|.*\|\s*$/.test(L[i])) rows.push(L[i++])
+        out += table(rows)
+        continue
+      }
+      if ((m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(l))) { flush(); var n = Math.min(5, m[1].length + 2); out += '<h' + n + '>' + inline(m[2]) + '</h' + n + '>'; i++; continue }
+      if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { flush(); out += '<hr>'; i++; continue }
+      if (/^\s*>/.test(l)) {
+        flush()
+        var q = []
+        while (i < L.length && /^\s*>/.test(L[i])) q.push(L[i++].replace(/^\s*>\s?/, ''))
+        out += '<blockquote>' + md(q.join('\n')) + '</blockquote>'
+        continue
+      }
+      if (LI.test(l)) {
+        flush()
+        var items = []
+        while (i < L.length && (LI.test(L[i]) || (items.length && /^\s{2,}\S/.test(L[i])))) items.push(L[i++])
+        out += list(items)
+        continue
+      }
+      para.push(l)
+      i++
+    }
+    flush()
+    return out
+  }
+  function withCursor(html) {
+    var k = Math.max(html.lastIndexOf('</p>'), html.lastIndexOf('</li>'))
+    return k >= 0 && k > html.length - 16 ? html.slice(0, k) + '<i class="cursor"></i>' + html.slice(k) : html + '<i class="cursor"></i>'
+  }
+
+  // ------------------------------------------------------------ api
+  function toLogin() { location.href = '/__login' }
+  function handle(r) {
+    if (r.type === 'opaqueredirect' || r.status === 401) { toLogin(); return Promise.reject(new Error('需要重新登录')) }
+    if (r.status === 502 || r.status === 503 || r.status === 504) { setStatus('offline'); return Promise.reject(new Error('家里电脑暂时连不上')) }
+    return r.json().then(function (j) {
+      if (!j || !j.ok) throw Object.assign(new Error((j && j.error && j.error.message) || '请求失败'), { code: j && j.error && j.error.code })
+      return j.value
+    }, function () { throw new Error('请求失败 (HTTP ' + r.status + ')') })
+  }
+  function get(path) { return fetch(path, { cache: 'no-store', redirect: 'manual' }).then(handle) }
+  function post(path, body) { return fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), redirect: 'manual' }).then(handle) }
+  function rpc(method, payload, rpcId) { return post('/m/api/rpc', { method: method, payload: payload, rpcId: rpcId }) }
+  function respond(rpcId, result) { return post('/m/api/respond', { rpcId: rpcId, result: result }) }
+  function imgUrl(s, id) { return '/m/api/img?s=' + enc(s) + '&id=' + enc(id) }
+
+  // ------------------------------------------------------------ state
+  var S = {
+    ws: [], wsById: {}, sessions: [], byId: {}, blanks: {},
+    run: new Set(), asks: new Map(), qs: new Map(), chats: new Map(),
+    filter: store.get('filter', 'all'), query: '', cur: null, booted: false, hellos: 0,
+    att: [], drafts: store.get('drafts', {}), status: 'connecting',
+  }
+  var el = {}
+  ;['app', 'home', 'chat', 'status', 'chips', 'list', 'rows', 'ptr', 'fab', 'searchBox', 'q', 'cTitle', 'cSub', 'scroller', 'older', 'msgs', 'tail',
+    'toBottom', 'dock', 'input', 'send', 'attach', 'file', 'thumbs', 'sheetWrap', 'sheet', 'viewer', 'toast', 'head'].forEach(function (id) { el[id] = document.getElementById(id) })
+
+  function chatState(id) {
+    return { id: id, items: [], pending: [], partial: null, lastSeq: -1, firstSeq: -1, hasMore: false, loaded: false, loading: false, err: false,
+      buf: [], open: new Set(), todos: null, todoOpen: false, queue: [], title: '', w: null, model: null, models: null }
+  }
+  // Auto titles occasionally arrive as Markdown ("**Session Title:** x").
+  function cleanTitle(t) { return String(t || '').replace(/\*\*|__|`/g, '').replace(/^\s*(session\s*)?title\s*[:：]\s*/i, '').trim() }
+  function wsOf(id) { var s = S.byId[id], c = S.chats.get(id); return (s && s.w) || (c && c.w) || null }
+  function wsTitle(w) { return w ? (S.wsById[w] ? S.wsById[w].title : '') : '未归类' }
+  function isRunning(id) { return S.run.has(id) }
+  function pendingCount(id) {
+    var n = 0
+    S.asks.forEach(function (a) { if (a.s === id) n++ })
+    S.qs.forEach(function (q) { if (q.s === id) n++ })
+    return n
+  }
+
+  // ------------------------------------------------------------ status / toast
+  function setStatus(st) {
+    S.status = st
+    el.status.className = 'status ' + st
+    el.status.lastChild.textContent = { online: '已连接', connecting: '连接中', offline: '电脑离线' }[st]
+    if (S.cur) renderHead()
+  }
+  var toastT = 0
+  function toast(msg, kind) {
+    el.toast.textContent = msg
+    el.toast.className = 'toast on' + (kind ? ' ' + kind : '')
+    clearTimeout(toastT)
+    toastT = setTimeout(function () { el.toast.className = 'toast' }, 2600)
+  }
+  function copy(text) {
+    function fallback() {
+      var t = document.createElement('textarea')
+      t.value = text; t.style.position = 'fixed'; t.style.opacity = '0'
+      document.body.appendChild(t); t.select()
+      try { document.execCommand('copy'); toast('已复制') } catch (e) { toast('复制失败', 'err') }
+      t.remove()
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { toast('已复制') }, fallback)
+    else fallback()
+  }
+
+  // ------------------------------------------------------------ home
+  function sortedWorkspaces() {
+    var last = {}
+    S.sessions.forEach(function (s) { if (s.w) last[s.w] = Math.max(last[s.w] || 0, s.at) })
+    return S.ws.slice().sort(function (a, b) { return (last[b.id] || 0) - (last[a.id] || 0) })
+  }
+  function renderChips() {
+    var h = '<button class="chip' + (S.filter === 'all' ? ' on' : '') + '" data-f="all">全部</button>'
+    sortedWorkspaces().forEach(function (w) { h += '<button class="chip' + (S.filter === w.id ? ' on' : '') + '" data-f="' + esc(w.id) + '">' + esc(w.title) + '</button>' })
+    if (S.sessions.some(function (s) { return !s.w })) h += '<button class="chip' + (S.filter === 'none' ? ' on' : '') + '" data-f="none">未归类</button>'
+    el.chips.innerHTML = h
+  }
+  function rowHtml(s) {
+    var tag = pendingCount(s.id) ? '<span class="tag ask">待确认</span>' : isRunning(s.id) ? '<span class="tag run"><i></i>运行中</span>' : ''
+    return '<button class="row" data-open="' + esc(s.id) + '"><div class="mid"><div class="t' + (s.title ? '' : ' none') + '">' + esc(s.title || '未命名对话') +
+      '</div><div class="m">' + tag + '<span>' + esc(wsTitle(s.w)) + '</span></div></div><span class="when">' + when(s.at) + '</span></button>'
+  }
+  function renderHome() {
+    renderChips()
+    if (!S.booted) { el.rows.innerHTML = new Array(7).join('<div class="sk"></div>'); return }
+    var list = S.sessions.filter(function (s) {
+      // "全部" mirrors the desktop sidebar: only sessions that belong to a
+      // workspace. Leftover ungrouped logs live under the "未归类" chip.
+      if (S.filter === 'none' ? s.w : S.filter === 'all' ? !s.w : s.w !== S.filter) return false
+      if (!S.query) return true
+      var q = S.query.toLowerCase()
+      return (s.title || '').toLowerCase().indexOf(q) >= 0 || wsTitle(s.w).toLowerCase().indexOf(q) >= 0
+    }).sort(function (a, b) { return b.at - a.at })
+    var h = ''
+    var waiting = S.asks.size + S.qs.size
+    if (waiting) {
+      var first = (S.asks.values().next().value || S.qs.values().next().value).s
+      h += '<button class="alert" data-open="' + esc(first) + '">' + ic('alert') + '<span>' + waiting + ' 个操作等你确认</span>' + ic('chev', 's') + '</button>'
+    }
+    var groups = [['进行中', []], ['今天', []], ['昨天', []], ['最近 7 天', []], ['更早', []]]
+    list.forEach(function (s) { groups[isRunning(s.id) || pendingCount(s.id) ? 0 : bucket(s.at)][1].push(s) })
+    groups.forEach(function (g) { if (g[1].length) h += '<div class="sec">' + g[0] + '</div><div class="grp">' + g[1].map(rowHtml).join('') + '</div>' })
+    if (!list.length) h += '<div class="empty"><b>' + (S.query ? '没有匹配的对话' : '这里还没有对话') + '</b>' + (S.query ? '' : '点右下角 + 开始') + '</div>'
+    el.rows.innerHTML = h
+  }
+  var homeRaf = 0
+  function scheduleHome() {
+    if (homeRaf) return
+    homeRaf = requestAnimationFrame(function () { homeRaf = 0; renderHome() })
+  }
+  // The last list is kept on the phone so a cold launch paints instantly;
+  // the network copy replaces it a moment later.
+  function loadBoot() {
+    return get('/m/api/boot').then(function (v) {
+      store.set('boot', v)
+      applyBoot(v)
+    })
+  }
+  function applyBoot(v) {
+    S.ws = v.workspaces
+    S.wsById = {}
+    v.workspaces.forEach(function (w) { S.wsById[w.id] = w })
+    S.blanks = v.blanks || {}
+    var local = S.byId
+    S.sessions = v.sessions
+    S.byId = {}
+    S.run = new Set()
+    v.sessions.forEach(function (s) {
+      s.title = cleanTitle(s.title)
+      S.byId[s.id] = s
+      if (s.run) S.run.add(s.id)
+      if (!s.title && local[s.id] && local[s.id].title) s.title = local[s.id].title
+    })
+    if (S.filter !== 'all' && S.filter !== 'none' && !S.wsById[S.filter]) S.filter = 'all'
+    S.booted = true
+    renderHome()
+    if (S.cur) { renderHead(); syncSend() }
+  }
+  var bootT = 0
+  function scheduleBoot() { clearTimeout(bootT); bootT = setTimeout(function () { loadBoot().catch(function () {}) }, 500) }
+
+  function setRun(id, on) {
+    if (on) S.run.add(id); else S.run.delete(id)
+    var s = S.byId[id]
+    if (s) { s.run = on; s.at = Date.now() }
+    else scheduleBoot() // a new (formerly blank) session just started: it now belongs in the list
+    scheduleHome()
+    if (id === S.cur) {
+      var c = S.chats.get(id)
+      if (c && !on) c.partial = null
+      renderHead(); syncSend(); drawDock()
+      if (c) draw(c)
+    }
+  }
+  function setTitle(id, t) {
+    t = cleanTitle(t)
+    if (!t) return
+    var s = S.byId[id], c = S.chats.get(id)
+    if (s) s.title = t
+    if (c) c.title = t
+    scheduleHome()
+    if (id === S.cur) renderHead()
+  }
+  function touch(id) { var s = S.byId[id]; if (s) { s.at = Date.now(); scheduleHome() } }
+
+  // ------------------------------------------------------------ navigation
+  function show(view) { el.app.classList.toggle('in-chat', view === 'chat') }
+  function openChat(id, fromPop) {
+    if (!id) return
+    if (S.cur && S.cur !== id) saveDraft()
+    S.cur = id
+    var c = S.chats.get(id)
+    if (!c) { c = chatState(id); S.chats.set(id, c) }
+    if (!fromPop) history.pushState({ v: 'chat', s: id }, '', '#' + enc(id))
+    show('chat')
+    el.input.value = S.drafts[id] || ''
+    autosize()
+    S.att = []
+    drawThumbs()
+    renderHead()
+    renderMsgs(c, true)
+    drawDock()
+    syncSend()
+    if (!c.loaded && !c.loading) loadHistory(c)
+    loadModel(c)
+  }
+  function closeChat() {
+    saveDraft()
+    if (S.cur && !S.byId[S.cur]) scheduleBoot()
+    S.cur = null
+    show('home')
+    el.dock.innerHTML = ''
+    renderHome()
+  }
+  function saveDraft() {
+    if (!S.cur) return
+    var v = el.input.value
+    if (v) S.drafts[S.cur] = v; else delete S.drafts[S.cur]
+    store.set('drafts', S.drafts)
+  }
+
+  // overlays (sheet / viewer) own one history entry so Android back closes them
+  var overlay = null
+  function pushOverlay(kind, onClose) {
+    overlay = { kind: kind, onClose: onClose, resolve: null }
+    history.pushState(Object.assign({}, history.state, { o: kind }), '')
+  }
+  function closeOverlay() {
+    if (!overlay) return Promise.resolve()
+    return new Promise(function (res) { overlay.resolve = res; history.back() })
+  }
+  window.addEventListener('popstate', function (e) {
+    if (overlay) {
+      var o = overlay
+      overlay = null
+      o.onClose()
+      if (o.resolve) o.resolve()
+      return
+    }
+    var st = e.state || {}
+    if (st.v === 'chat' && st.s) openChat(st.s, true)
+    else if (S.cur) closeChat()
+  })
+
+  function openSheet(html) {
+    el.sheet.onclick = null
+    el.sheet.innerHTML = html
+    el.sheetWrap.hidden = false
+    requestAnimationFrame(function () { requestAnimationFrame(function () { el.sheetWrap.classList.add('on') }) })
+    pushOverlay('sheet', function () {
+      el.sheetWrap.classList.remove('on')
+      setTimeout(function () { if (!overlay) { el.sheetWrap.hidden = true; el.sheet.innerHTML = '' } }, 340)
+    })
+  }
+  function view(src) {
+    el.viewer.firstElementChild.src = src
+    el.viewer.hidden = false
+    pushOverlay('viewer', function () { el.viewer.hidden = true; el.viewer.firstElementChild.removeAttribute('src') })
+  }
+
+  // ------------------------------------------------------------ chat: data
+  function loadHistory(c) {
+    c.loading = true
+    c.err = false
+    c.buf = []
+    if (c.id === S.cur) renderMsgs(c)
+    return get('/m/api/history?s=' + enc(c.id) + '&n=40').then(function (v) {
+      c.items = v.items
+      c.partial = v.partial
+      c.lastSeq = v.lastSeq
+      c.firstSeq = v.firstSeq
+      c.hasMore = v.hasMore
+      if (v.todos) c.todos = v.todos
+      if (v.title) setTitle(c.id, v.title)
+      c.loaded = true
+    }, function (e) {
+      c.err = true
+      if (c.id === S.cur) toast(e.message, 'err')
+    }).then(function () {
+      c.loading = false
+      var buf = c.buf
+      c.buf = []
+      buf.forEach(function (f) { apply(c, f) })
+      if (c.id === S.cur) { renderMsgs(c, true); drawDock() }
+    })
+  }
+  function loadOlder(c) {
+    if (c.olderLoading || !c.hasMore) return
+    c.olderLoading = true
+    renderMsgs(c, false, true)
+    get('/m/api/history?s=' + enc(c.id) + '&n=40&before=' + c.firstSeq).then(function (v) {
+      var h0 = el.scroller.scrollHeight, t0 = el.scroller.scrollTop
+      c.items = v.items.concat(c.items)
+      if (v.firstSeq >= 0) c.firstSeq = v.firstSeq
+      c.hasMore = v.hasMore
+      c.olderLoading = false
+      renderMsgs(c, false, true)
+      el.scroller.scrollTop = t0 + (el.scroller.scrollHeight - h0)
+    }, function (e) {
+      c.olderLoading = false
+      renderMsgs(c, false, true)
+      toast(e.message, 'err')
+    })
+  }
+  function loadModel(c) {
+    if (c.models || c.modelLoading) return
+    c.modelLoading = true
+    rpc('session.models', { sessionId: c.id }).then(function (v) {
+      c.models = v
+      c.model = v.current
+      if (c.id === S.cur) renderHead()
+    }, function () {}).then(function () { c.modelLoading = false })
+  }
+  function modelName(c) {
+    var cur = c.model
+    if (!cur) return ''
+    var name = cur.model, eff = cur.reasoningEffort
+    ;(c.models ? c.models.groups : []).forEach(function (g) {
+      if (g.id !== cur.provider) return
+      g.models.forEach(function (m) {
+        if (m.id !== cur.model) return
+        name = m.name
+        if (eff && m.reasoning) m.reasoning.efforts.forEach(function (e) { if (e.id === eff) eff = EFF[e.id] || e.name })
+      })
+    })
+    return name + (eff ? ' · ' + (EFF[eff] || eff) : '')
+  }
+  var EFF = { off: '不思考', low: '低', medium: '中', high: '高', max: '最大' }
+
+  // ------------------------------------------------------------ chat: live frames
+  function onFrame(f) {
+    switch (f.t) {
+      case 'p': return
+      case 'hello':
+        S.hellos++
+        setStatus('online')
+        S.asks.clear()
+        S.qs.clear()
+        if (S.hellos > 1) resync()
+        scheduleHome()
+        return
+      case 'run': return setRun(f.s, f.on)
+      case 'list': return scheduleBoot()
+      case 'title': return setTitle(f.s, f.title)
+      case 'ask': S.asks.set(f.id, f); buzz(30); return onPending(f.s)
+      case 'askDone': { var a = S.asks.get(f.id); S.asks.delete(f.id); return onPending((a && a.s) || f.s) }
+      case 'q': S.qs.set(f.rpc, f); buzz(30); return onPending(f.s)
+      case 'qDone': { var q = S.qs.get(f.rpc); S.qs.delete(f.rpc); return onPending((q && q.s) || f.s) }
+      case 'agentErr': if (f.s === S.cur) toast(f.msg || '运行出错', 'err'); return
+      case 'err': return
+    }
+    var c = S.chats.get(f.s)
+    if (!c) return
+    if (c.loading) { c.buf.push(f); return }
+    if (!c.loaded) return
+    apply(c, f)
+  }
+  function onPending(s) {
+    scheduleHome()
+    if (s === S.cur) drawDock()
+  }
+  function ensurePartial(c) { return c.partial || (c.partial = { text: '', think: false, tool: null }) }
+  function fresh(c, seq) {
+    if (seq <= c.lastSeq) return false
+    c.lastSeq = seq
+    return true
+  }
+  function apply(c, f) {
+    switch (f.t) {
+      case 'd': {
+        var add = ''
+        f.p.forEach(function (x) { if (x[0] > c.lastSeq) { add += x[1]; c.lastSeq = x[0] } })
+        if (add) { var p = ensurePartial(c); p.text += add; p.tool = null; drawPartial(c) }
+        return
+      }
+      case 'think': if (fresh(c, f.seq)) { ensurePartial(c).think = true; drawPartial(c) } return
+      case 'tooling': if (fresh(c, f.seq)) { ensurePartial(c).tool = f.name; drawPartial(c) } return
+      case 'step': if (fresh(c, f.seq)) { c.partial = null; drawPartial(c) } return
+      case 'turn': if (fresh(c, f.seq)) { S.run.add(c.id); drawPartial(c) } return
+      case 'final':
+        if (!fresh(c, f.seq)) return
+        c.partial = null
+        if (f.it) c.items.push(f.it)
+        draw(c)
+        return
+      case 'item': {
+        var it = f.it
+        if (!it || !fresh(c, it.seq)) return
+        if (it.k === 'u') {
+          var i = -1
+          c.pending.forEach(function (p, j) { if (i < 0 && p.rid && p.rid === it.rid) i = j })
+          if (i >= 0) c.pending.splice(i, 1)
+          touch(c.id)
+        }
+        if (it.k === 'end') { c.partial = null; touch(c.id) }
+        c.items.push(it)
+        draw(c)
+        return
+      }
+      case 'result': {
+        if (!fresh(c, f.seq)) return
+        for (var k = c.items.length - 1; k >= 0; k--) {
+          var t = c.items[k]
+          if (t.k === 't' && t.id === f.id) { t.done = true; t.err = f.err; t.out = f.out; break }
+        }
+        draw(c)
+        return
+      }
+      case 'todo': c.todos = f.todos; if (c.id === S.cur) drawDock(); return
+      case 'queue': c.queue = f.items || []; if (c.id === S.cur) drawDock(); return
+    }
+  }
+  function resync() {
+    loadBoot().catch(function () {})
+    S.chats.forEach(function (c) {
+      if (c.id === S.cur) loadHistory(c)
+      else { c.loaded = false; c.partial = null }
+    })
+  }
+
+  // ------------------------------------------------------------ chat: rendering
+  function nearBottom() { var s = el.scroller; return s.scrollHeight - s.scrollTop - s.clientHeight < 90 }
+  function toBottom() { el.scroller.scrollTop = el.scroller.scrollHeight }
+  var msgRaf = 0, tailRaf = 0
+  function draw(c) {
+    if (c.id !== S.cur || msgRaf) return
+    msgRaf = requestAnimationFrame(function () { msgRaf = 0; renderMsgs(c) })
+  }
+  function drawPartial(c) {
+    if (c.id !== S.cur || tailRaf) return
+    tailRaf = requestAnimationFrame(function () {
+      tailRaf = 0
+      var stick = nearBottom()
+      drawTail(c)
+      if (stick) toBottom()
+    })
+  }
+  function renderHead() {
+    var c = S.chats.get(S.cur)
+    if (!c) return
+    var s = S.byId[c.id]
+    el.cTitle.textContent = (s && s.title) || c.title || '新对话'
+    var sub = ''
+    if (S.status !== 'online') sub += (S.status === 'offline' ? '电脑离线' : '连接中…') + ' · '
+    else if (isRunning(c.id)) sub += '<span class="live"><span class="spin s"></span>运行中</span> · '
+    sub += esc(wsTitle(wsOf(c.id)))
+    if (c.model) sub += ' · ' + esc(modelName(c))
+    el.cSub.innerHTML = sub
+  }
+  function userHtml(c, it) {
+    var imgs = (it.imgs || []).map(function (im) {
+      return '<img loading="lazy" data-view src="' + esc(im.url || imgUrl(c.id, im.id)) + '" alt="">'
+    }).join('')
+    return '<div class="u' + (it.pending ? ' pending' : '') + '">' + (imgs ? '<div class="imgs">' + imgs + '</div>' : '') + (it.text ? '<div class="bub">' + esc(it.text) + '</div>' : '') + '</div>'
+  }
+  function asstHtml(it) {
+    var h = '<div class="a">'
+    if (it.think) {
+      h += '<button class="think" data-think="' + it.seq + '">' + ic('bulb', 's') + '思考过程' + ic(it._t ? 'down' : 'chev', 's') + '</button>'
+      if (it._t) h += '<div class="think-body">' + esc(it.think) + '</div>'
+    }
+    if (it.text) {
+      h += '<div class="md">' + (it._h || (it._h = md(it.text))) + '</div>'
+      if (it._fin) h += '<div class="acts"><button data-copymsg="' + it.seq + '">' + ic('copy', 's') + '复制</button></div>'
+    }
+    return h + '</div>'
+  }
+  function toolRow(t) {
+    var st = t.err ? ic('xc', 's st bad') : t.done ? ic('checkc', 's st') : t._spin ? '<span class="spin s"></span>' : ''
+    var body = ''
+    if (t._o) {
+      if (t.detail && t.detail !== t.title) body += '<pre>' + esc(t.detail) + '</pre>'
+      if (t.out) body += '<pre class="out' + (t.err ? ' bad' : '') + '">' + esc(t.out) + '</pre>'
+    }
+    return '<div class="tr' + (t._o ? ' o' : '') + '"><button class="trh" data-tool="' + esc(t.id) + '">' + ic(KI[t.kind] || 'other', 's') + '<span>' + esc(t.title) + '</span>' + st + '</button>' + body + '</div>'
+  }
+  function toolsHtml(c, arr) {
+    if (arr.length === 1) return '<div class="tools single">' + toolRow(arr[0]) + '</div>'
+    var key = arr[0].seq, open = c.open.has(key)
+    var kinds = [], errs = 0, spin = false
+    arr.forEach(function (t) {
+      var k = KI[t.kind] || 'other'
+      if (kinds.indexOf(k) < 0 && kinds.length < 4) kinds.push(k)
+      if (t.err) errs++
+      if (t._spin) spin = true
+    })
+    var last = arr[arr.length - 1]
+    return '<div class="tools' + (open ? ' o' : '') + '"><button class="tg" data-group="' + key + '"><span class="kinds">' + kinds.map(function (k) { return ic(k, 's') }).join('') +
+      '</span><span class="n">' + arr.length + ' 个操作</span>' + (errs ? '<span class="bad">' + errs + ' 失败</span>' : '') +
+      '<span class="last">' + (open ? '' : esc(last.title)) + '</span>' + (spin ? '<span class="spin s"></span>' : '') + ic('chev', 's chev') + '</button>' +
+      (open ? arr.map(toolRow).join('') : '') + '</div>'
+  }
+  var END = { completed: '完成', interrupted: '已中断', aborted: '已停止', cancelled: '已停止', error: '出错', failed: '出错' }
+  function endHtml(it) {
+    var bad = it.reason === 'error' || it.reason === 'failed'
+    return '<div class="end' + (bad ? ' bad' : '') + '">' + esc(END[it.reason] || it.reason) + (it.ms ? ' · ' + dur(it.ms) : '') + '</div>'
+  }
+  function renderMsgs(c, jump, keep) {
+    if (c.id !== S.cur) return
+    var stick = jump || (!keep && nearBottom())
+    if (!c.loaded) {
+      el.older.innerHTML = ''
+      el.msgs.innerHTML = c.err && !c.loading ? '<div class="hint"><b>加载失败</b><button class="link" data-retry>重试</button></div>' : '<div class="spin"></div>'
+      el.tail.innerHTML = ''
+      return
+    }
+    el.older.innerHTML = c.hasMore ? '<button data-older>' + (c.olderLoading ? '加载中…' : '查看更早的消息') + '</button>' : ''
+    var running = isRunning(c.id), lastEnd = -1
+    c.items.forEach(function (it, i) { if (it.k === 'end') lastEnd = i })
+    c.items.forEach(function (it, i) { if (it.k === 't') it._spin = running && !it.done && i > lastEnd })
+    // Copy action only under each turn's final answer, not every interim note.
+    var lastA = null
+    c.items.forEach(function (it) {
+      if (it.k === 'a') { if (lastA) lastA._fin = false; lastA = it; it._fin = false }
+      else if (it.k === 'end' || it.k === 'u') { if (lastA) lastA._fin = true; lastA = null }
+    })
+    if (lastA) lastA._fin = !running
+    var h = '', group = []
+    function flush() { if (group.length) { h += toolsHtml(c, group); group = [] } }
+    c.items.forEach(function (it) {
+      if (it.k === 't') { group.push(it); return }
+      flush()
+      if (it.k === 'u') h += userHtml(c, it)
+      else if (it.k === 'a') h += asstHtml(it)
+      else if (it.k === 'end') h += endHtml(it)
+    })
+    flush()
+    c.pending.forEach(function (p) { h += userHtml(c, p) })
+    if (!h) h = '<div class="hint"><b>' + esc(wsTitle(wsOf(c.id))) + '</b>发一条消息开始</div>'
+    el.msgs.innerHTML = h
+    drawTail(c)
+    if (stick) toBottom()
+    el.toBottom.hidden = nearBottom()
+  }
+  function lastToolSpinning(c) {
+    for (var i = c.items.length - 1; i >= 0; i--) { var it = c.items[i]; if (it.k === 't') return Boolean(it._spin); if (it.k !== 'end') return false }
+    return false
+  }
+  function drawTail(c) {
+    var p = c.partial, h = ''
+    if (p && p.text) h = '<div class="a"><div class="md">' + withCursor(md(p.text)) + '</div></div>'
+    else if (p && p.tool) h = '<div class="typing"><span class="spin s"></span>正在' + esc(toolLabel(p.tool)) + '…</div>'
+    else if (p && p.think) h = '<div class="typing"><span class="dots"><i></i><i></i><i></i></span>思考中</div>'
+    else if (isRunning(c.id) && c.loaded && !lastToolSpinning(c)) h = '<div class="typing"><span class="dots"><i></i><i></i><i></i></span></div>'
+    el.tail.innerHTML = h
+  }
+
+  // ------------------------------------------------------------ dock
+  function askHtml(c, a) {
+    var t = null
+    if (a.call) for (var i = c.items.length - 1; i >= 0; i--) if (c.items[i].k === 't' && c.items[i].id === a.call) { t = c.items[i]; break }
+    var title = a.title || (t && t.title) || toolLabel(a.tool)
+    var detail = a.detail || (t && t.detail) || ''
+    return '<div class="card ask"><div class="ch"><i class="dotw"></i>需要你确认<span class="x">' + esc(toolLabel(a.tool)) + '</span></div>' +
+      '<div class="ct">' + esc(title) + '</div>' + (a.why ? '<div class="cw">' + esc(a.why) + '</div>' : '') +
+      (detail && detail !== title ? '<pre>' + esc(detail) + '</pre>' : '') +
+      '<div class="btns"><button class="btn danger" data-deny="' + esc(a.id) + '">拒绝</button><button class="btn pri" data-allow="' + esc(a.id) + '">' + ic('check', 's') + '允许</button></div></div>'
+  }
+  function qHtml(q) {
+    var sel = q._sel || (q._sel = {}), custom = q._custom || (q._custom = {})
+    var plan = null
+    var body = (q.qs || []).map(function (it, ii) {
+      if (it.intent && it.intent.kind === 'plan-review') plan = it.intent
+      var chosen = sel[it.id] || []
+      var opts = (it.options || []).map(function (o, oi) {
+        return '<button class="opt' + (chosen.indexOf(o.label) >= 0 ? ' on' : '') + '" data-qo="' + ii + ':' + oi + '">' + esc(o.label) + (o.description ? '<small>' + esc(o.description) + '</small>' : '') + '</button>'
+      }).join('')
+      return '<div class="qq">' + (it.header ? '<div class="qh">' + esc(it.header) + '</div>' : '') + '<div class="qt">' + esc(it.question) + '</div>' +
+        (it.detail ? '<div class="qd">' + esc(it.detail) + '</div>' : '') + (opts ? '<div class="opts">' + opts + '</div>' : '') +
+        '<input class="qin" data-qi="' + ii + '" placeholder="' + (opts ? '或者自己写…' : '输入回答…') + '" value="' + esc(custom[it.id] || '') + '"></div>'
+    }).join('')
+    return '<div class="card" data-q="' + esc(q.rpc) + '"><div class="ch q"><i class="dotw"></i>DSH 在问你</div>' + body +
+      '<div class="btns"><button class="btn" data-qcancel>取消</button><button class="btn pri" data-qsubmit>' + esc(plan ? plan.approve || '批准' : '提交') + '</button></div></div>'
+  }
+  function todoHtml(c) {
+    var t = c.todos, done = 0, cur = null
+    t.forEach(function (x) { if (x.status === 'completed') done++; else if (!cur || (x.status === 'in_progress' && cur.status !== 'in_progress')) cur = x })
+    if (done === t.length && !isRunning(c.id)) return ''
+    if (!c.todoOpen) {
+      return '<button class="pill" data-todo>' + ic(done === t.length ? 'checkc' : 'dotc', 's') + '<b>进度 ' + done + '/' + t.length + '</b><span>' + esc(cur ? cur.content : '全部完成') +
+        '</span><span class="bar-p"><i style="width:' + Math.round((done / t.length) * 100) + '%"></i></span></button>'
+    }
+    return '<div class="card todos" data-todo>' + t.map(function (x) {
+      return '<div class="todo ' + esc(x.status) + '">' + ic(x.status === 'completed' ? 'checkc' : x.status === 'in_progress' ? 'dotc' : 'circle', 's') + '<span>' + esc(x.content) + '</span></div>'
+    }).join('') + '</div>'
+  }
+  var dockDirty = false
+  function drawDock() {
+    var c = S.cur && S.chats.get(S.cur)
+    if (!c) { el.dock.innerHTML = ''; return }
+    // Hold re-renders only while the user is typing into a dock input; a
+    // focused button must not block its own selection state from painting.
+    var ae = document.activeElement
+    if (ae && el.dock.contains(ae) && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) { dockDirty = true; return }
+    dockDirty = false
+    var h = ''
+    S.asks.forEach(function (a) { if (a.s === c.id) h += askHtml(c, a) })
+    S.qs.forEach(function (q) { if (q.s === c.id) h += qHtml(q) })
+    ;(c.queue || []).forEach(function (x) {
+      h += '<div class="qitem">' + ic('send', 's') + '<span>' + esc(x.text || '图片') + '</span><em>' + (x.place === 'steering' ? '插入中' : '排队中') + '</em><button data-unqueue="' + esc(x.id) + '" aria-label="撤回">' + ic('x', 's') + '</button></div>'
+    })
+    if (c.todos && c.todos.length) h += todoHtml(c)
+    el.dock.innerHTML = h
+  }
+
+  // ------------------------------------------------------------ composer
+  function autosize() {
+    el.input.style.height = 'auto'
+    el.input.style.height = Math.min(150, el.input.scrollHeight) + 'px'
+  }
+  function syncSend() {
+    var has = el.input.value.trim() || S.att.length
+    if (S.cur && isRunning(S.cur) && !has) {
+      el.send.className = 'send stop'
+      el.send.innerHTML = ic('stop')
+      el.send.disabled = false
+      el.send.setAttribute('aria-label', '停止')
+    } else {
+      el.send.className = 'send'
+      el.send.innerHTML = ic('send')
+      el.send.disabled = !has
+      el.send.setAttribute('aria-label', '发送')
+    }
+  }
+  function drawThumbs() {
+    el.thumbs.hidden = !S.att.length
+    el.thumbs.innerHTML = S.att.map(function (a, i) { return '<div class="th"><img src="' + esc(a.url) + '" alt=""><button data-rm="' + i + '" aria-label="移除">' + ic('x') + '</button></div>' }).join('')
+  }
+  function prepImage(file) {
+    return new Promise(function (res, rej) {
+      var url = URL.createObjectURL(file), img = new Image()
+      img.onload = function () {
+        var k = Math.min(1, 2048 / Math.max(img.naturalWidth, img.naturalHeight))
+        var w = Math.round(img.naturalWidth * k), h = Math.round(img.naturalHeight * k)
+        var cv = document.createElement('canvas')
+        cv.width = w; cv.height = h
+        var g = cv.getContext('2d')
+        g.fillStyle = '#fff'; g.fillRect(0, 0, w, h); g.drawImage(img, 0, 0, w, h)
+        var data = cv.toDataURL('image/jpeg', 0.86)
+        res({ url: url, b64: data.slice(data.indexOf(',') + 1), type: 'image/jpeg', name: String(file.name || 'photo').replace(/\.\w+$/, '') + '.jpg' })
+      }
+      img.onerror = function () { URL.revokeObjectURL(url); rej(new Error('无法读取图片')) }
+      img.src = url
+    })
+  }
+  function send() {
+    var c = S.cur && S.chats.get(S.cur)
+    if (!c) return
+    var text = el.input.value.trim(), att = S.att
+    if (!text && !att.length) return
+    var rid = uuid(), content = []
+    att.forEach(function (a) { content.push({ type: 'image', mediaType: a.type, data: a.b64, name: a.name }) })
+    if (text) content.push({ type: 'text', text: text })
+    var busy = isRunning(c.id)
+    var pend = { k: 'u', rid: rid, text: text, imgs: att.map(function (a) { return { url: a.url } }), pending: true }
+    if (!busy) { c.pending.push(pend); renderMsgs(c, true) }
+    el.input.value = ''
+    delete S.drafts[c.id]
+    store.set('drafts', S.drafts)
+    S.att = []
+    drawThumbs(); autosize(); syncSend()
+    buzz(8)
+    rpc('session.prompt', { sessionId: c.id, mode: 'queue', content: content, clientTimeZone: TZ }, rid).then(function (v) {
+      if (v && v.command) {
+        c.pending = c.pending.filter(function (p) { return p !== pend })
+        draw(c)
+        toast(v.command.text || '命令已执行')
+      } else if (!busy) {
+        setRun(c.id, true)
+        touch(c.id)
+      }
+    }, function (e) {
+      c.pending = c.pending.filter(function (p) { return p !== pend })
+      draw(c)
+      if (!el.input.value) { el.input.value = text; autosize(); syncSend() }
+      toast('没发出去：' + e.message, 'err')
+    })
+  }
+  function stop() {
+    var id = S.cur
+    buzz(12)
+    rpc('session.cancel', { sessionId: id }).then(function () { toast('已停止') }, function (e) { toast(e.message, 'err') })
+  }
+
+  // ------------------------------------------------------------ sheets
+  function newSheet() {
+    var pre = S.filter !== 'all' && S.filter !== 'none' ? S.filter : null
+    openSheet('<div class="sh-h">新对话<small>选择在哪个工作区里干活</small></div><div class="sh-b">' + sortedWorkspaces().map(function (w) {
+      return '<button class="opt-row' + (w.id === pre ? ' on' : '') + '" data-w="' + esc(w.id) + '"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>' + esc(w.title) + '</b><small>' + esc(w.path) + '</small></span>' + ic('chev', 's') + '</button>'
+    }).join('') + '</div>')
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-w]')
+      if (!b || b.disabled) return
+      b.disabled = true
+      closeOverlay().then(function () { startChat(b.dataset.w) })
+    }
+  }
+  function startChat(wid) {
+    var reuse = S.blanks[wid]
+    var p = reuse ? Promise.resolve({ sessionId: reuse }) : rpc('session.create', { workspaceId: wid })
+    if (reuse) delete S.blanks[wid]
+    p.then(function (v) {
+      var c = chatState(v.sessionId)
+      c.loaded = true
+      c.w = wid
+      S.chats.set(c.id, c)
+      openChat(c.id)
+      setTimeout(function () { el.input.focus() }, 380)
+    }, function (e) { toast('创建失败：' + e.message, 'err') })
+  }
+  function modelSheet() {
+    var c = S.chats.get(S.cur)
+    if (!c) return
+    openSheet('<div class="sh-h">模型</div><div class="sh-b" id="mb"><div class="spin"></div></div>')
+    var box = document.getElementById('mb')
+    function paint() {
+      var cur = c.model || {}, h = ''
+      c.models.groups.forEach(function (g) {
+        h += '<div class="sh-sec">' + esc(g.name) + '</div>'
+        g.models.forEach(function (m) {
+          var on = cur.provider === g.id && cur.model === m.id
+          h += '<button class="opt-row' + (on ? ' on' : '') + '" data-p="' + esc(g.id) + '" data-m="' + esc(m.id) + '"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>' + esc(m.name) + '</b>' +
+            (m.description ? '<small>' + esc(m.description) + '</small>' : '') + '</span>' + (on ? ic('check', 'chk') : '') + '</button>'
+          if (on && m.reasoning && m.reasoning.efforts.length) {
+            var eff = cur.reasoningEffort || m.reasoning.defaultEffort
+            h += '<div class="efforts">' + m.reasoning.efforts.map(function (e) { return '<button class="chip' + (eff === e.id ? ' on' : '') + '" data-e="' + esc(e.id) + '">' + esc(EFF[e.id] || e.name) + '</button>' }).join('') + '</div>'
+          }
+        })
+      })
+      ;(c.models.failures || []).forEach(function (f) { h += '<div class="sh-sec">' + esc(f.name) + ' · 暂不可用</div>' })
+      box.innerHTML = h
+    }
+    rpc('session.models', { sessionId: c.id }).then(function (v) { c.models = v; c.model = v.current; renderHead(); paint() }, function (e) { box.innerHTML = '<div class="empty">' + esc(e.message) + '</div>' })
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-m],[data-e]')
+      if (!b || !c.models) return
+      var cur = c.model || {}, sel
+      if (b.dataset.e) sel = { provider: cur.provider, model: cur.model, reasoningEffort: b.dataset.e }
+      else {
+        var g = c.models.groups.filter(function (x) { return x.id === b.dataset.p })[0]
+        var m = g && g.models.filter(function (x) { return x.id === b.dataset.m })[0]
+        if (!m) return
+        sel = { provider: g.id, model: m.id }
+        if (m.reasoning) {
+          var keep = m.reasoning.efforts.some(function (x) { return x.id === cur.reasoningEffort }) ? cur.reasoningEffort : m.reasoning.defaultEffort
+          if (keep) sel.reasoningEffort = keep
+        }
+      }
+      rpc('session.selectModel', Object.assign({ sessionId: c.id }, sel)).then(function (r) { c.model = r.selected; buzz(); paint(); renderHead() }, function (err) { toast(err.message, 'err') })
+    }
+  }
+  function moreSheet() {
+    var c = S.chats.get(S.cur)
+    if (!c) return
+    openSheet('<div class="sh-h">' + esc(el.cTitle.textContent) + '</div><div class="sh-b">' +
+      '<button class="opt-row" data-a="model"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>切换模型</b><small>' + esc(modelName(c) || '当前模型') + '</small></span>' + ic('chev', 's') + '</button>' +
+      '<button class="opt-row" data-a="rename"><span class="ico">' + ic('pen', 's') + '</span><span class="mid"><b>重命名</b></span></button>' +
+      '<button class="opt-row danger" data-a="archive"><span class="ico">' + ic('archive', 's') + '</span><span class="mid"><b>归档对话</b><small>从列表隐藏，记录仍保存在电脑上</small></span></button></div>')
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-a]')
+      if (!b) return
+      var a = b.dataset.a
+      if (a === 'archive' && !b.dataset.sure) { b.dataset.sure = '1'; b.querySelector('b').textContent = '再点一次确认归档'; buzz(); return }
+      closeOverlay().then(function () {
+        if (a === 'model') modelSheet()
+        else if (a === 'rename') renameSheet()
+        else if (a === 'archive') archive(c.id)
+      })
+    }
+  }
+  function renameSheet() {
+    var c = S.chats.get(S.cur)
+    if (!c) return
+    openSheet('<div class="sh-h">重命名</div><div class="sh-in"><input id="rn" maxlength="80" enterkeyhint="done" value="' + esc(el.cTitle.textContent) + '"><div class="btns"><button class="btn" data-x>取消</button><button class="btn pri" data-ok>保存</button></div></div>')
+    var inp = document.getElementById('rn')
+    setTimeout(function () { inp.focus(); inp.select() }, 360)
+    function save() {
+      var t = inp.value.trim()
+      if (!t) return
+      rpc('session.rename', { sessionId: c.id, title: t }).then(function (r) { setTitle(c.id, r.title); closeOverlay() }, function (e) { toast(e.message, 'err') })
+    }
+    inp.onkeydown = function (e) { if (e.key === 'Enter') save() }
+    el.sheet.onclick = function (e) {
+      if (e.target.closest('[data-x]')) closeOverlay()
+      else if (e.target.closest('[data-ok]')) save()
+    }
+  }
+  function archive(id) {
+    rpc('workspace.archiveSession', { sessionId: id }).then(function () {
+      S.sessions = S.sessions.filter(function (s) { return s.id !== id })
+      delete S.byId[id]
+      toast('已归档')
+      if (S.cur === id) history.back()
+    }, function (e) { toast(e.message, 'err') })
+  }
+
+  // ------------------------------------------------------------ events (SSE)
+  var es = null, lastBeat = 0, retry = 0, retryT = 0
+  function connect() {
+    clearTimeout(retryT)
+    if (es) { es.close(); es = null }
+    setStatus('connecting')
+    var src = new EventSource('/m/api/events')
+    es = src
+    lastBeat = Date.now()
+    src.onmessage = function (m) {
+      if (es !== src) return
+      lastBeat = Date.now()
+      var f
+      try { f = JSON.parse(m.data) } catch (e) { return }
+      if (f.t === 'hello') retry = 0
+      try { onFrame(f) } catch (e) { console.error(e) }
+    }
+    src.onerror = function () {
+      if (es !== src) return
+      if (src.readyState === 2) { es = null; setStatus('offline'); reconnectLater() } else setStatus('connecting')
+    }
+  }
+  function reconnectLater() {
+    retry = Math.min(retry + 1, 5)
+    fetch('/m/api/ping', { redirect: 'manual', cache: 'no-store' }).then(function (r) {
+      if (r.type === 'opaqueredirect' || r.status === 401) toLogin()
+    }, function () {})
+    retryT = setTimeout(connect, 1000 * Math.min(15, Math.pow(2, retry)))
+  }
+  setInterval(function () {
+    if (document.visibilityState === 'visible' && es && Date.now() - lastBeat > 40000) connect()
+  }, 10000)
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible') { saveDraft(); return }
+    if (!es || Date.now() - lastBeat > 25000) connect()
+    else scheduleHome()
+  })
+
+  // ------------------------------------------------------------ wiring
+  document.querySelectorAll('[data-ic]').forEach(function (n) { n.innerHTML = ic(n.dataset.ic) })
+  el.status.lastChild.textContent = '连接中'
+
+  el.rows.addEventListener('click', function (e) { var b = e.target.closest('[data-open]'); if (b) openChat(b.dataset.open) })
+  el.chips.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-f]')
+    if (!b) return
+    S.filter = b.dataset.f
+    store.set('filter', S.filter)
+    renderHome()
+    el.list.scrollTop = 0
+  })
+  // Connection sheet: where this client points, reconnect, and (inside the
+  // Android shell) switch to another server.
+  var IN_APP = /DSHApp\//.test(navigator.userAgent)
+  el.status.onclick = function () {
+    openSheet('<div class="sh-h">连接<small>' + esc(location.host) + '</small></div><div class="sh-b">' +
+      '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>重新连接</b><small>' +
+      ({ online: '当前已连接', connecting: '正在连接…', offline: '电脑暂时连不上' })[S.status] + '</small></span></button>' +
+      (IN_APP ? '<button class="opt-row" data-a="server"><span class="ico">' + ic('web', 's') + '</span><span class="mid"><b>切换服务器</b><small>换一台电脑，或换一个访问地址</small></span>' + ic('chev', 's') + '</button>' : '') +
+      '</div>')
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-a]')
+      if (!b) return
+      if (b.dataset.a === 'server') { location.href = 'dshapp://setup'; return }
+      closeOverlay().then(function () { connect(); loadBoot().catch(function (err) { toast(err.message, 'err') }) })
+    }
+  }
+  document.getElementById('btnSearch').onclick = function () { el.searchBox.hidden = false; el.q.focus() }
+  document.getElementById('qClose').onclick = function () { el.q.value = ''; S.query = ''; el.searchBox.hidden = true; renderHome() }
+  el.q.oninput = function () { S.query = el.q.value.trim(); renderHome() }
+  el.fab.onclick = newSheet
+  document.getElementById('back').onclick = function () { history.back() }
+  el.head.onclick = modelSheet
+  document.getElementById('more').onclick = moreSheet
+  el.sheetWrap.firstElementChild.onclick = function () { closeOverlay() }
+  el.viewer.onclick = function () { closeOverlay() }
+
+  // pull to refresh (home list)
+  ;(function () {
+    var y0 = null, dy = 0, busy = false
+    el.list.addEventListener('touchstart', function (e) { y0 = el.list.scrollTop <= 0 && !busy ? e.touches[0].clientY : null; dy = 0 }, { passive: true })
+    el.list.addEventListener('touchmove', function (e) {
+      if (y0 == null) return
+      dy = Math.max(0, e.touches[0].clientY - y0)
+      el.ptr.style.height = Math.min(72, dy * 0.45) + 'px'
+      el.ptr.firstElementChild.style.transform = 'rotate(' + dy * 1.6 + 'deg)'
+    }, { passive: true })
+    el.list.addEventListener('touchend', function () {
+      if (y0 == null) return
+      y0 = null
+      function done() { busy = false; el.ptr.classList.remove('go'); el.ptr.style.transition = 'height .25s'; el.ptr.style.height = '0'; setTimeout(function () { el.ptr.style.transition = '' }, 260) }
+      if (dy * 0.45 >= 56) {
+        busy = true
+        el.ptr.classList.add('go')
+        el.ptr.style.height = '48px'
+        buzz()
+        if (!es) connect()
+        loadBoot().then(done, function (e) { toast(e.message, 'err'); done() })
+      } else done()
+    })
+  })()
+
+  el.scroller.addEventListener('click', function (e) {
+    var c = S.chats.get(S.cur), b
+    if (!c) return
+    if ((b = e.target.closest('a[href]'))) { e.preventDefault(); window.open(b.href, '_blank', 'noopener'); return }
+    if ((b = e.target.closest('[data-group]'))) { var k = +b.dataset.group; if (c.open.has(k)) c.open.delete(k); else c.open.add(k); renderMsgs(c, false, true); return }
+    if ((b = e.target.closest('[data-tool]'))) {
+      for (var i = c.items.length - 1; i >= 0; i--) if (c.items[i].k === 't' && c.items[i].id === b.dataset.tool) { c.items[i]._o = !c.items[i]._o; break }
+      renderMsgs(c, false, true)
+      return
+    }
+    if ((b = e.target.closest('[data-think]'))) { c.items.forEach(function (it) { if (it.seq === +b.dataset.think) it._t = !it._t }); renderMsgs(c, false, true); return }
+    if ((b = e.target.closest('[data-copy]'))) { copy(b.closest('pre').querySelector('code').textContent); return }
+    if ((b = e.target.closest('[data-copymsg]'))) { c.items.forEach(function (it) { if (it.seq === +b.dataset.copymsg) copy(it.text) }); return }
+    if ((b = e.target.closest('[data-older]'))) { loadOlder(c); return }
+    if ((b = e.target.closest('[data-retry]'))) { loadHistory(c); return }
+    if ((b = e.target.closest('img[data-view]'))) { view(b.src); return }
+  })
+  el.scroller.addEventListener('scroll', function () { el.toBottom.hidden = nearBottom() }, { passive: true })
+  el.toBottom.onclick = function () { el.scroller.scrollTo({ top: el.scroller.scrollHeight, behavior: 'smooth' }) }
+  window.addEventListener('resize', function () { if (S.cur && nearBottom()) toBottom() })
+
+  el.dock.addEventListener('click', function (e) {
+    var c = S.chats.get(S.cur), b
+    if (!c) return
+    if ((b = e.target.closest('[data-allow],[data-deny]'))) {
+      var id = b.dataset.allow || b.dataset.deny, a = S.asks.get(id)
+      if (!a) return
+      var outcome = b.dataset.allow ? 'allowed-once' : 'rejected'
+      b.parentNode.querySelectorAll('button').forEach(function (x) { x.disabled = true })
+      buzz(outcome === 'allowed-once' ? 15 : 8)
+      respond(a.rpc, { ok: true, value: { sessionId: a.s, approvalId: a.id, outcome: outcome } }).then(function (r) {
+        S.asks.delete(id)
+        drawDock(); scheduleHome()
+        if (!r.accepted && r.reason !== 'not-pending') toast('没有生效：' + r.reason, 'err')
+      }, function (err) { drawDock(); toast(err.message, 'err') })
+      return
+    }
+    var card = e.target.closest('[data-q]')
+    if (card) {
+      var q = S.qs.get(card.dataset.q)
+      if (!q) return
+      if ((b = e.target.closest('[data-qo]'))) {
+        var ix = b.dataset.qo.split(':'), item = q.qs[+ix[0]], opt = item.options[+ix[1]], cur = q._sel[item.id] || []
+        if (item.multiSelect) q._sel[item.id] = cur.indexOf(opt.label) >= 0 ? cur.filter(function (x) { return x !== opt.label }) : cur.concat(opt.label)
+        else q._sel[item.id] = [opt.label]
+        buzz(6)
+        drawDock()
+        return
+      }
+      if (e.target.closest('[data-qcancel]')) {
+        respond(q.rpc, { ok: false, error: { code: 'cancelled', message: 'the user closed this question request', details: {} } }).then(function () { S.qs.delete(q.rpc); drawDock(); scheduleHome() }, function (err) { toast(err.message, 'err') })
+        return
+      }
+      if (e.target.closest('[data-qsubmit]')) {
+        var missing = false
+        var answers = q.qs.map(function (it) {
+          var selected = q._sel[it.id] || [], custom = (q._custom[it.id] || '').trim()
+          if (!selected.length && !custom) missing = true
+          var ans = { id: it.id, selected: selected }
+          if (custom) ans.custom = custom
+          return ans
+        })
+        if (missing) { toast('每个问题都需要回答'); return }
+        respond(q.rpc, { ok: true, value: { sessionId: q.s, answer: { answers: answers } } }).then(function () { S.qs.delete(q.rpc); drawDock(); scheduleHome(); buzz() }, function (err) { toast(err.message, 'err') })
+        return
+      }
+      return
+    }
+    if ((b = e.target.closest('[data-unqueue]'))) {
+      rpc('session.updateQueue', { sessionId: c.id, itemId: b.dataset.unqueue, action: { kind: 'remove' } }).then(function () {}, function (err) { toast(err.message, 'err') })
+      return
+    }
+    if (e.target.closest('[data-todo]')) { c.todoOpen = !c.todoOpen; drawDock() }
+  })
+  el.dock.addEventListener('input', function (e) {
+    var inp = e.target.closest('[data-qi]'), card = e.target.closest('[data-q]')
+    if (!inp || !card) return
+    var q = S.qs.get(card.dataset.q)
+    if (q) q._custom[q.qs[+inp.dataset.qi].id] = inp.value
+  })
+  el.dock.addEventListener('focusout', function () { setTimeout(function () { if (dockDirty && !el.dock.contains(document.activeElement)) drawDock() }, 0) })
+
+  el.input.addEventListener('input', function () { autosize(); syncSend() })
+  el.send.onclick = function () { if (el.send.classList.contains('stop')) stop(); else send() }
+  el.attach.onclick = function () { el.file.click() }
+  el.file.onchange = function () {
+    var files = Array.prototype.slice.call(el.file.files || [], 0, Math.max(0, 6 - S.att.length))
+    el.file.value = ''
+    Promise.all(files.map(function (f) { return prepImage(f).catch(function () { toast('有图片读取失败', 'err'); return null }) })).then(function (list) {
+      list.forEach(function (a) { if (a) S.att.push(a) })
+      drawThumbs(); syncSend()
+    })
+  }
+  el.thumbs.addEventListener('click', function (e) {
+    var b = e.target.closest('[data-rm]')
+    if (!b) return
+    S.att.splice(+b.dataset.rm, 1)
+    drawThumbs(); syncSend()
+  })
+
+  setInterval(function () { if (!S.cur && document.visibilityState === 'visible') scheduleHome() }, 60000)
+
+  // ------------------------------------------------------------ boot
+  // The Android shell calls this when a notification is tapped.
+  window.dshOpen = function (id) {
+    if (!id) return
+    if (overlay) closeOverlay().then(function () { openChat(id) })
+    else if (S.cur !== id) openChat(id)
+  }
+  // /m/?debug exposes the frame entry point for UI checks with synthetic frames.
+  if (/[?&]debug\b/.test(location.search)) window.__dsh = { S: S, onFrame: onFrame }
+  var deep = decodeURIComponent((location.hash || '').slice(1))
+  history.replaceState({ v: 'home' }, '', location.pathname)
+  var cached = store.get('boot', null)
+  if (cached && cached.sessions) { try { applyBoot(cached); S.run = new Set() } catch (e) {} }
+  renderHome()
+  loadBoot().then(function () { if (deep && S.byId[deep]) openChat(deep) }, function (e) { toast(e.message, 'err') })
+  connect()
+})()

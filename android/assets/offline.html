@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="color-scheme" content="light dark">
+<title>DSH</title>
+<style>
+  :root { --bg: #f5f6f8; --text: #16181d; --text2: #5c6370; --accent: #4d6bfe; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0e1014; --text: #eceef2; --text2: #a4abb7; --accent: #6f87ff; } }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 system-ui, sans-serif; }
+  body { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px; text-align: center; box-sizing: border-box; }
+  .logo { width: 72px; height: 72px; border-radius: 22px; background: linear-gradient(135deg, #6f87ff, #3548da); display: grid; place-items: center; margin-bottom: 24px; }
+  .logo svg { width: 40px; height: 40px; fill: none; stroke: #fff; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+  h1 { font-size: 19px; margin: 0 0 6px; }
+  p { margin: 0 0 28px; color: var(--text2); font-size: 14px; }
+  button { height: 48px; padding: 0 40px; border: 0; border-radius: 24px; background: var(--accent); color: #fff; font: 600 16px system-ui, sans-serif; }
+  button:active { opacity: .85; }
+  a { margin-top: 18px; color: var(--accent); font-size: 14px; text-decoration: none; }
+</style>
+</head>
+<body>
+  <div class="logo"><svg viewBox="0 0 24 24"><path d="M6 8l4 4-4 4M13 17h5"/></svg></div>
+  <h1 id="t">连不上</h1>
+  <p id="d">请检查手机网络</p>
+  <button id="retry">重试</button>
+  <a href="dshapp://setup">更换服务器地址</a>
+  <script>
+    var q = new URLSearchParams(location.search)
+    if (q.get('why') === 'pc') {
+      document.getElementById('t').textContent = '电脑没有响应'
+      document.getElementById('d').textContent = '确认电脑已开机、DSH 在运行，然后重试'
+    }
+    document.getElementById('retry').onclick = function () {
+      var u = q.get('u')
+      if (/^https?:\/\//.test(u || '')) location.replace(u)
+      else location.href = 'dshapp://setup'
+    }
+  </script>
+</body>
+</html>

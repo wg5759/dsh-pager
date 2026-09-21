@@ -1,7 +1,7 @@
 # dsh-pager
 
-**DeepSeek Harness 的"寻呼机"**：一个 DSH 插件，加一个 33 KB 的安卓 App；iPhone 把网页添加到主屏幕即可。
-人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。
+**DeepSeek Harness 的"寻呼机"**：一个 DSH 插件，加一个约 40 KB 的安卓 App；iPhone 把网页添加到主屏幕即可。
+人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。电脑上的 **Claude Code 和 Codex** 也能一起管（见 [docs/agents.md](docs/agents.md)）。
 
 > 非官方社区项目，与 DeepSeek 没有关联。· [English](#english)
 
@@ -22,7 +22,7 @@ dsh-pager 分别对应三件事：一套为手机重写的界面，在电脑上�
 ## 它是什么
 
 ```
-安卓 · dsh-pager App（33 KB：WebView 外壳 + 常驻通知服务）
+安卓 · dsh-pager App（41 KB：WebView 外壳 + 常驻通知服务）
 iPhone · 同一个界面，Safari "添加到主屏幕"（网页推送做锁屏提醒）
    │   你已有的远程通道：国内云服务器上的登录网关，或异地组网（与翻墙无关）
    ▼
@@ -35,6 +35,8 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
         ├─ /m/api/notify       后台提醒流（120 秒心跳，断线补发）
         ├─ /m/api/call|fs|raw  结果查看器：完整 diff 和输出、工作区文件、图片视频（只读，限工作区内）
         ├─ /m/api/push/*       iPhone 锁屏提醒（网页推送，端到端加密）
+        ├─ /m/api/agents/*     Claude Code / Codex：钩子入口、会话记录、从手机继续
+        ├─ /m/api/app/*        App 内更新（安装包在你自己的电脑上）
         └─ /m/api/rpc|respond  发消息 / 停止 / 换模型 / 审批 / 回答提问（白名单）
 ```
 
@@ -44,7 +46,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 
 | 项目 | 结果 |
 |---|---|
-| 安装包 | **33 KB**（3 个 Java 文件，零第三方库） |
+| 安装包 | **41 KB**（4 个 Java 文件，零第三方库；1.3.0） |
 | 打开 4 MB 级长会话 | 下发 **28 KB**，1.45 秒 |
 | 首页（工作区 + 会话列表） | 2.4 KB |
 | 冷启动 | 首帧 195 ms，0.39 秒出列表（本地缓存），0.87 秒刷新到最新 |
@@ -61,6 +63,14 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
   - 不依赖 Google 推送（FCM），国产系统（HyperOS、HarmonyOS）照样能用。开机、升级后自动恢复需要系统允许 App"自启动"（这两个系统默认不允许，见 [docs/android.md](docs/android.md)）。
   - iPhone 走网页推送（iOS 16.4+），内容端到端加密，苹果的推送服务看不到内容。
 - **结果查看器**：在手机上看完整的改动对比（逐行 diff）和命令输出，浏览工作区里的文本、Markdown、图片、视频。只能看该对话所在工作区里的文件；密钥、证书、`.env`、名字带"密码"等的文件不显示，内容里有私钥的文件拒绝打开。
+- **Claude Code / Codex 也能管**：
+  - 离开电脑时，它们的确认请求发到手机：电脑锁屏或 3 分钟没人操作就算离开，一回到电脑就交还。
+  - 完成时提醒；手机上能看它们的会话记录，也能从手机继续对话。
+- **通知栏就能处理**：
+  - 允许（需先解锁）或拒绝；
+  - 选择题直接点选项；
+  - 完成后直接回复下一条指令。
+- **App 内更新、分享到 DSH**：电脑上有新版本时，手机点一下就更新，不用再插线；在其他 App 里"分享"文字和图片给 DSH，选好对话即可。
 - **省流量**：插件在电脑上把原始事件折叠成"用户消息 / 回复 / 每个工具一行 / 回合结束"，再压缩下发。
 - **界面热更新**：界面跑在电脑上，App 只是外壳。改完界面，手机下拉刷新就生效，不用重装。
 - **不增加暴露面**：挂在 DSH 自己的 web 服务上，不开新端口，DSH 仍只绑 127.0.0.1。
@@ -69,8 +79,8 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 - **不绑定通道**：走你已有的登录网关或异地组网，不内置第三方隧道或中继。流量不经过别人的服务器，用国内云服务器就能全程国内直连（作者自用的就是这样）。
 - **只用 DSH 公开的线协议**（`POST /api/<方法>`、`/api/events.*`），不依赖 DSH 内部模块，DSH 升级时不容易坏。
 - **小而可审计**：
-  - 服务端约 1,600 行原生 JS，零 npm 依赖（网页推送的加密和签名也是用 Node 自带的 crypto 写的）；界面是原生 JS/CSS，无框架。
-  - App 820 行 Java、无 Gradle，一条命令即可复现构建。
+  - 服务端约 2,500 行原生 JS，零 npm 依赖（网页推送的加密和签名也是用 Node 自带的 crypto 写的）；界面是原生 JS/CSS，无框架。
+  - App 约 1,200 行 Java、无 Gradle，一条命令即可复现构建。
 
 ## 与同类项目对比
 
@@ -86,7 +96,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 | [dsh-remote-web-gateway](https://github.com/summer1238/dsh-remote-web-gateway) | 网关插件 | 网页 | Cloudflare Quick Tunnel | GitHub 登录 + 一次性配对 + 设备撤销 | 未提及 | 无 App |
 | [DSH Mobile (sorsama)](https://github.com/sorsama/deepseek-harness-mobile) | 原生 Compose App + dsh-relay 插件 | 原生，功能对齐 GUI | 局域网 / relay / 自有反代 | relay 配对 + 固定公钥 | 前台服务：回合完成、目标完成或受阻、审阅或提问等待 | 14.5 MB |
 | [dsh-remote-mobile](https://github.com/IceApriler/dsh-remote-mobile) | 安全网关插件 + 移动端样式 | 桌面界面 + 移动端 CSS | 局域网 / Tailscale | 扫码 + RSA + 防爆破 | 未提及 | 无 App |
-| **dsh-pager（本项目）** | 插件（挂 /m）+ 安卓 WebView 外壳 + iPhone 网页 App | 为手机重写的界面，服务端先折叠；带结果查看器 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 安卓：常驻前台服务 + 专用低频流，通知栏直接允许/拒绝，断线补发；iPhone：网页推送 | **33 KB** |
+| **dsh-pager（本项目）** | 插件（挂 /m）+ 安卓 WebView 外壳 + iPhone 网页 App；也接 Claude Code / Codex | 为手机重写的界面，服务端先折叠；带结果查看器 | 任意现有通道，不内置隧道 | 交给你的登录网关或异地组网 | 安卓：常驻前台服务 + 专用低频流，通知栏直接允许/拒绝，断线补发；iPhone：网页推送 | **41 KB** |
 
 **我们的定位**：不是把桌面界面搬到手机上，而是做一个"寻呼机"。你锁屏时它替你盯着，需要你时叫你，点开就能处理。所以我们优先保证三件事：体积最小、流量最省、后台提醒最可靠。认证和隧道交给你已有的、更专业的工具。
 
@@ -164,6 +174,15 @@ DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。
 
 **iPhone / iPad**（iOS 16.4+）：用 Safari 打开 `https://你的地址/m/` 并登录，点"分享"→"添加到主屏幕"，从主屏幕图标打开后，点连接状态 →"开启锁屏提醒"。详见 [docs/ios.md](docs/ios.md)。
 
+### 4.（可选）接入 Claude Code / Codex
+
+```bash
+node tools/install-hooks.mjs claude     # Claude Code
+node tools/install-hooks.mjs codex      # Codex（装好后在 Codex 里输入 /hooks 信任一次）
+```
+
+详见 [docs/agents.md](docs/agents.md)。
+
 ## 安全须知
 
 - **能在手机上发指令，就等于能让电脑执行命令**（受 DSH 自身审批策略约束）。所以远程通道必须有你信得过的认证：带登录的网关，或者只有你自己设备的异地组网。
@@ -172,12 +191,14 @@ DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。
 - 没有统计、没有第三方 SDK、不依赖 Google 服务；公开版 APK 关闭了 WebView 远程调试（1.2.1 起）。
 - 结果查看器只读，且只能读该对话所在工作区里的文件（符号链接、目录联接指到外面的也会被拦住），并隐藏密钥类文件。它不会识别普通文档里写的密码。
 - iPhone 推送的签名密钥和设备列表保存在电脑上的 `~/.dsh-pager/`，不在代码仓库里。
+- Claude Code / Codex 的钩子凭 `~/.dsh-pager/hook.json` 里的随机令牌与插件通信，令牌只在本机。从手机继续对话时，消息作为一个整体参数交给命令行工具，不经过 shell。
+- App 内更新：安装包从你自己的电脑下载，先校验 SHA-256；Android 只接受同一签名的更新，并且每次都要你确认。
 
 ## 开发
 
 ```bash
-cd plugin && npm test                 # 插件单测（43 项，含 RFC 8291 官方测试向量）
-node --test tools/*.test.mjs          # 转发器单测
+cd plugin && npm test                 # 插件单测（59 项，含 RFC 8291 官方测试向量）
+node --test tools/*.test.mjs          # 转发器、钩子安装器单测
 node tools/make-icons.mjs             # 重新生成网页 App 图标
 node plugin/dev.mjs                   # 独立开发服务器 http://127.0.0.1:3090/m/，直连本机 DSH，改服务端代码不用重启 DSH
 bash android/build.sh public          # 编译 App（无 Gradle，需 Android SDK build-tools 34 + JDK 17）
@@ -188,9 +209,11 @@ bash android/build.sh public          # 编译 App（无 Gradle，需 Android SD
 ```
 plugin/     DSH 插件：index.js 挂载 · server.js 接口与实时桥 · fold.js 事件折叠 · notify.js 提醒中枢
             files.js 结果查看器（只读、限工作区）· push.js 网页推送 · www/ 手机界面、Service Worker、Web App 清单
-android/    App 外壳：MainActivity（WebView + 首次配置）· NotifyService（后台提醒）· BootReceiver · build.sh
-tools/      forward.mjs 把 DSH 转发到一个私有地址（异地组网用）· make-icons.mjs 生成图标
-docs/       远程访问 · Android · iPhone · DSH 协议笔记
+            agents.js Claude Code / Codex 钩子中枢 · presence.js 是否在电脑前 · transcripts.js 读它们的会话文件
+android/    App 外壳：MainActivity（WebView、首次配置、App 内更新、分享）· NotifyService（后台提醒）
+            UpdateReceiver · BootReceiver · build.sh
+tools/      forward.mjs 转发到私有地址 · pager-hook.mjs 钩子命令 · install-hooks.mjs 安装钩子 · make-icons.mjs 生成图标
+docs/       远程访问 · Android · iPhone · Claude Code / Codex · DSH 协议笔记
 ```
 
 ## 许可与声明
@@ -204,7 +227,7 @@ docs/       远程访问 · Android · iPhone · DSH 协议笔记
 ## English
 
 **dsh-pager** is a pager for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH). It has two parts:
-- a 33 KB Android app;
+- a 41 KB Android app;
 - a DSH plugin that serves a phone-first UI and API at `/m` on DSH's own web server.
 
 Together they let you follow sessions, send prompts, and approve or reject tool calls from the notification shade while you are away from your PC. This is an unofficial community project, not affiliated with DeepSeek.
@@ -217,16 +240,17 @@ Together they let you follow sessions, send prompts, and approve or reject tool 
 - **No new exposure.**
   - DSH keeps binding 127.0.0.1, and no port is opened.
   - `/m/api/*` applies DSH's own Host/Origin fence, plus a 9-method RPC allow-list.
-  - Remote access is left to your VPN or authenticating gateway; see [docs/remote-access.md](docs/remote-access.md). DSH has no login, so never expose it publicly without one.
+  - Remote access is left to your own authenticating gateway or private network (WireGuard, EasyTier, Tailscale…); see [docs/remote-access.md](docs/remote-access.md). DSH has no login, so never expose it publicly without one.
 - **Small and auditable.**
   - Zero npm dependencies.
-  - About 1,000 lines of server JS and a vanilla JS UI that hot-reloads on the phone.
-  - An 820-line Java shell built without Gradle.
+  - About 2,500 lines of server JS and a vanilla JS UI that hot-reloads on the phone.
+  - A 1,200-line Java shell built without Gradle, with in-app updates served from your own PC.
+- **Claude Code and Codex too.** Hooks route their permission prompts to the phone while you are away (screen locked or 3 min idle) and hand them back the moment you touch the PC; you can also read their sessions and continue them from the phone. See [docs/agents.md](docs/agents.md).
 
 Quick start:
 1. Link `plugin/` into `~/.dsh/profiles/web/node_modules/dsh-pager`.
 2. Add `- insert: [{ id: mobile, name: 'dsh-pager' }]` to `cordis.patch.yml` and restart DSH.
-3. Make `/m/` reachable from the phone through a VPN or an authenticating gateway.
+3. Make `/m/` reachable from the phone through an authenticating gateway or a private network.
 4. Install the APK from Releases and enter your server address.
 
 MIT licensed.

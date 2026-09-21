@@ -37,9 +37,12 @@ App 本身只是一个 WebView 外壳（界面由电脑上的插件提供），�
 | 事件 | 通知 | 可以直接操作 |
 |---|---|---|
 | 工具需要审批 | "需要确认"（高优先级，会弹出） | **允许 / 拒绝** 按钮；点通知本身打开会话 |
-| Agent 在提问 | "DSH 在问你 · 会话名" | 点开会话回答 |
-| 回合正常结束 | "任务完成"：会话名、耗时、回复开头 | 点开会话 |
+| Agent 在提问 | "DSH 在问你 · 会话名" | 只有一个单选题、不超过 3 个选项时直接显示选项按钮；只有一个问题时可以直接输入回答；其他情况点开会话回答 |
+| 回合正常结束 | "任务完成"：会话名、耗时、回复开头 | **回复**：直接输入下一条指令；点通知打开会话 |
 | 回合出错 | 会话名 +"运行出错：…"（在"任务完成"通道） | 点开会话 |
+| Claude Code / Codex 要确认、完成、在等你 | 同上，标题带工具名（见 [agents.md](agents.md)） | 允许 / 拒绝，完成后可回复 |
+
+锁屏时，通知上的"允许"、选项、回复都要先解锁手机才会生效（Android 12 及以上），"拒绝"不用解锁。这样即使手机被别人拿到，也不能替你批准操作。
 
 "任务完成"只在以下两种情况下提醒：
 - 回合跑了 10 秒以上；
@@ -89,6 +92,7 @@ adb logcat -s DSHNotify
 | `FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_SPECIAL_USE` | 让提醒连接在后台保持 |
 | `RECEIVE_BOOT_COMPLETED` | 开机后恢复提醒 |
 | `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | 引导你把电池策略设为不限制 |
+| `REQUEST_INSTALL_PACKAGES` | App 内更新：安装从你电脑下载的新版本（每次都由系统弹框让你确认） |
 
 App 没有统计，没有第三方 SDK，也不依赖 Google 服务。本地只存三样东西：
 - 服务器地址；
@@ -130,7 +134,7 @@ DSH_DEFAULT_SERVER=https://pc.example.com:8443
 - 但拿到手机 USB 调试授权的人也能这样读取网关 Cookie、操作 DSH，所以公开版关闭了它。
 - 自用的私有构建，请只在你自己信任的电脑上授权 USB 调试。
 
-构建流程：aapt2 → javac → d8 → zipalign → apksigner，大约 30 秒，产物约 33 KB。
+构建流程：aapt2 → javac → d8 → zipalign → apksigner，大约 30 秒，产物约 41 KB。
 
 **签名密钥**：
 - 第一次构建时会生成 `android/keystore/dsh.jks` 和 `password.txt`，都已被 git 忽略。
@@ -139,8 +143,23 @@ DSH_DEFAULT_SERVER=https://pc.example.com:8443
 
 **升级版本**：改 `android/build.sh` 里的 `VERSION_CODE`（每次 +1）和 `VERSION_NAME`。
 
-## 界面怎么更新
+## 界面和 App 怎么更新
 
 界面（HTML / CSS / JS）放在电脑上的插件里，App 每次打开都从电脑加载。所以：
 - 改界面不需要重装 App，手机上下拉刷新即可；
-- 只有改 App 外壳（`android/` 目录）时，才需要重新编译安装。
+- 只有改 App 外壳（`android/` 目录）时，才需要新的安装包。
+
+**App 内更新**（1.3.0 起）：新安装包不用再插线装到每台手机上。
+1. 在电脑上编译（`bash android/build.sh` 或 `public`）。`build.sh` 会在安装包旁边写一个 `<安装包>.json`，记录版本号和 SHA-256。
+2. 手机打开 App 时，会向插件查询 `/m/api/app/latest`。如果电脑上的版本号更高，顶部就会出现"有新版本"。
+3. 点"更新"后，App 从电脑下载安装包，边下边算 SHA-256，对不上就放弃，然后交给系统安装器。
+4. 第一次更新时，系统会让你允许 dsh-pager"安装未知应用"。之后每次安装，系统都会弹框让你确认。
+
+插件按以下顺序找安装包：
+1. 配置项 `appApk`（在 `cordis.patch.yml` 里插件那一行的 `config` 下）；
+2. `android/out/DSH.apk`（私有构建）；
+3. `android/out/` 里最新的 `dsh-pager-v*.apk`（公开构建）。
+
+没有配套 `.json` 的安装包不会被提供。Android 只接受同一把密钥签名的更新，所以别人的电脑推不了安装包给你的 App。
+
+1.3.0 之前的版本没有这个功能，要最后手动装一次 1.3.0。

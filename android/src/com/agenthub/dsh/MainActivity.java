@@ -3,13 +3,18 @@ package com.agenthub.dsh;
 import android.Manifest;
 import android.app.Activity;
 import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -17,6 +22,8 @@ import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
+import android.util.Base64;
+import android.util.Log;
 import android.webkit.CookieManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -27,7 +34,17 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.security.MessageDigest;
+import java.util.ArrayList;
 
 /**
  * dsh-pager phone app: a full-screen shell around the mobile UI that the DSH
@@ -53,6 +70,11 @@ public class MainActivity extends Activity {
     boolean dropHistory;
     boolean resumed;
     boolean askedThisLaunch;
+    /** The /m/ page has finished loading (its window.dsh* hooks exist). */
+    boolean appReady;
+    /** A share that arrived before the page was ready. */
+    String pendingShare;
+    volatile boolean updating;
 
     /** The configured server origin, e.g. https://dsh.example.com:8443 — or "" before setup. */
     static String server(Context c) {
@@ -83,7 +105,8 @@ public class MainActivity extends Activity {
         s.setSupportZoom(false);
         s.setAllowFileAccess(false);
         s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        s.setUserAgentString(s.getUserAgentString() + " DSHApp/" + BuildInfo.VERSION);
+        // "+code" lets the page compare against the build the PC offers (in-app update).
+        s.setUserAgentString(s.getUserAgentString() + " DSHApp/" + BuildInfo.VERSION + "+" + BuildInfo.VERSION_CODE);
 
         CookieManager.getInstance().setAcceptCookie(true);
 
@@ -102,6 +125,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (!isApp(u)) dropHistory = true;
+                appReady = false;
             }
 
             @Override
@@ -116,6 +140,12 @@ public class MainActivity extends Activity {
                     saveCookie();
                     NotifyService.start(MainActivity.this);
                     if (resumed) askPermissions();
+                    appReady = true;
+                    if (pendingShare != null) {
+                        String p = pendingShare;
+                        pendingShare = null;
+                        deliverShare(p);
+                    }
                 }
             }
 
@@ -165,6 +195,7 @@ public class MainActivity extends Activity {
             String session = getIntent().getStringExtra("session");
             web.loadUrl(session == null ? home() : home() + "#" + Uri.encode(session)); // the app opens a #session deep link on boot
         }
+        handleShare(getIntent());
     }
 
     // ------------------------------------------------------------------ routing
@@ -217,6 +248,12 @@ public class MainActivity extends Activity {
      * silently repoint the app at another server.
      */
     void appLink(WebView v, Uri u) {
+        if ("update".equals(u.getHost())) {
+            // Only our own page may start an install.
+            String cur = v.getUrl();
+            if (cur != null && isApp(Uri.parse(cur))) update();
+            return;
+        }
         if (!"setup".equals(u.getHost())) return;
         String entered = u.getQueryParameter("server");
         String current = v.getUrl();
@@ -307,15 +344,190 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ------------------------------------------------------------------ in-app update
+
+    void toastJs(String msg, boolean err) {
+        runOnUiThread(() -> web.evaluateJavascript("window.dshToast&&window.dshToast(" + JSONObject.quote(msg) + (err ? ",'err'" : "") + ")", null));
+    }
+
+    /** GET a path on our server with the gateway cookie; the caller disconnects. */
+    HttpURLConnection get(String path) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL(server(this) + path).openConnection();
+        c.setInstanceFollowRedirects(false);
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(60000);
+        String cookie = CookieManager.getInstance().getCookie(server(this) + "/");
+        if (cookie != null && !cookie.isEmpty()) c.setRequestProperty("Cookie", cookie);
+        int code = c.getResponseCode();
+        if (code != 200) {
+            c.disconnect();
+            throw new IOException("HTTP " + code);
+        }
+        return c;
+    }
+
+    /**
+     * Download the build the PC offers (GET /m/api/app/latest + /m/api/app/apk),
+     * check its SHA-256, and hand it to Android's package installer. Android then
+     * shows its own confirmation, and only accepts an APK signed with this app's key.
+     */
+    void update() {
+        if (updating) return;
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            toastJs("先允许 DSH 安装应用，再回来点一次更新", false);
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName())));
+            } catch (ActivityNotFoundException ignored) {
+            }
+            return;
+        }
+        updating = true;
+        new Thread(() -> {
+            PackageInstaller.Session session = null;
+            boolean committed = false;
+            try {
+                JSONObject latest;
+                HttpURLConnection c = get("/m/api/app/latest");
+                try (InputStream in = c.getInputStream()) {
+                    latest = new JSONObject(readAll(in)).getJSONObject("value");
+                } finally {
+                    c.disconnect();
+                }
+                if (latest.getInt("versionCode") <= BuildInfo.VERSION_CODE) {
+                    toastJs("已经是最新版本", false);
+                    return;
+                }
+                toastJs("正在下载 " + latest.optString("versionName") + "…", false);
+                PackageInstaller pi = getPackageManager().getPackageInstaller();
+                PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+                params.setAppPackageName(getPackageName());
+                session = pi.openSession(pi.createSession(params));
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                HttpURLConnection d = get("/m/api/app/apk");
+                try (InputStream in = d.getInputStream(); OutputStream out = session.openWrite("dsh.apk", 0, latest.optLong("size", -1))) {
+                    byte[] buf = new byte[65536];
+                    int k;
+                    while ((k = in.read(buf)) > 0) {
+                        md.update(buf, 0, k);
+                        out.write(buf, 0, k);
+                    }
+                    session.fsync(out);
+                } finally {
+                    d.disconnect();
+                }
+                StringBuilder hex = new StringBuilder();
+                for (byte b : md.digest()) hex.append(String.format("%02x", b));
+                if (!hex.toString().equalsIgnoreCase(latest.getString("sha256"))) throw new IOException("安装包校验不一致，已放弃");
+                int flags = PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0);
+                PendingIntent done = PendingIntent.getBroadcast(this, 42, new Intent(this, UpdateReceiver.class), flags);
+                session.commit(done.getIntentSender());
+                committed = true;
+                toastJs("下载完成，请在系统弹窗里点“安装”", false);
+            } catch (Exception e) {
+                Log.w("DSHUpdate", "update failed: " + e);
+                toastJs("更新失败：" + e.getMessage(), true);
+            } finally {
+                if (session != null) {
+                    if (!committed) session.abandon();
+                    session.close();
+                }
+                updating = false;
+            }
+        }, "dsh-update").start();
+    }
+
+    static String readAll(InputStream in) throws IOException {
+        ByteArrayOutputStream b = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int k;
+        while ((k = in.read(buf)) > 0) b.write(buf, 0, k);
+        return b.toString("UTF-8");
+    }
+
+    // ------------------------------------------------------------------ share to DSH
+
+    /**
+     * "Share" from another app: text and up to 6 images (shrunk here to 2048 px
+     * JPEG) go to the page, which asks which conversation to put them in.
+     */
+    @SuppressWarnings("deprecation")
+    void handleShare(Intent in) {
+        if (in == null) return;
+        String a = in.getAction();
+        if (!Intent.ACTION_SEND.equals(a) && !Intent.ACTION_SEND_MULTIPLE.equals(a)) return;
+        final String text = in.getStringExtra(Intent.EXTRA_TEXT);
+        final String subject = in.getStringExtra(Intent.EXTRA_SUBJECT);
+        final ArrayList<Uri> uris = new ArrayList<>();
+        if (Intent.ACTION_SEND.equals(a)) {
+            Uri u = in.getParcelableExtra(Intent.EXTRA_STREAM);
+            if (u != null) uris.add(u);
+        } else {
+            ArrayList<Uri> l = in.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (l != null) uris.addAll(l);
+        }
+        setIntent(new Intent(this, MainActivity.class)); // consumed: a rotation must not share it twice
+        new Thread(() -> {
+            try {
+                JSONArray imgs = new JSONArray();
+                for (int k = 0; k < uris.size() && imgs.length() < 6; k++) {
+                    String b64 = jpeg(uris.get(k));
+                    if (b64 != null) imgs.put(new JSONObject().put("name", "shared-" + (k + 1) + ".jpg").put("type", "image/jpeg").put("b64", b64));
+                }
+                String p = new JSONObject().put("text", text == null ? "" : text).put("subject", subject == null ? "" : subject).put("images", imgs).toString();
+                runOnUiThread(() -> deliverShare(p));
+            } catch (Exception e) {
+                Log.w("DSHShare", "share failed: " + e);
+            }
+        }, "dsh-share").start();
+    }
+
+    void deliverShare(String json) {
+        if (appReady) web.evaluateJavascript("window.dshShare&&window.dshShare(" + json + ")", null);
+        else pendingShare = json;
+    }
+
+    /** One shared image as base64 JPEG, at most 2048 px on the long side, on white. */
+    String jpeg(Uri u) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            try (InputStream in = getContentResolver().openInputStream(u)) {
+                BitmapFactory.decodeStream(in, null, o);
+            }
+            if (o.outWidth <= 0 || o.outHeight <= 0) return null;
+            int sample = 1;
+            while (Math.max(o.outWidth, o.outHeight) / sample > 4096) sample *= 2;
+            BitmapFactory.Options d = new BitmapFactory.Options();
+            d.inSampleSize = sample;
+            Bitmap bm;
+            try (InputStream in = getContentResolver().openInputStream(u)) {
+                bm = BitmapFactory.decodeStream(in, null, d);
+            }
+            if (bm == null) return null;
+            float k = Math.min(1f, 2048f / Math.max(bm.getWidth(), bm.getHeight()));
+            int w = Math.max(1, Math.round(bm.getWidth() * k)), h = Math.max(1, Math.round(bm.getHeight() * k));
+            Bitmap out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            Canvas cv = new Canvas(out);
+            cv.drawColor(Color.WHITE);
+            cv.drawBitmap(k < 1 ? Bitmap.createScaledBitmap(bm, w, h, true) : bm, 0, 0, null);
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            out.compress(Bitmap.CompressFormat.JPEG, 86, bo);
+            return Base64.encodeToString(bo.toByteArray(), Base64.NO_WRAP);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     // ------------------------------------------------------------------ lifecycle
 
-    /** A notification was tapped while the app is alive: jump to its session. */
+    /** A notification was tapped, or something was shared, while the app is alive. */
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
         String s = intent.getStringExtra("session");
         if (s != null) web.evaluateJavascript("window.dshOpen&&window.dshOpen(" + JSONObject.quote(s) + ")", null);
+        handleShare(intent);
     }
 
     @Override

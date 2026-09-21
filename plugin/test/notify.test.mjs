@@ -85,6 +85,36 @@ test('question notices use the first question text', () => {
   assert.deepEqual(out.map((e) => [e.t, e.text || e.rpc]), [['q', '发到哪个平台？'], ['qDone', 'rpc-q1']])
 })
 
+test('a single single-choice question with up to 3 options carries them for notification buttons', () => {
+  const h = hub()
+  const out = []
+  h.emit = ((orig) => (e) => { out.push(orig.call(h, e)); return e })(h.emit)
+  const opts = (n) => Array.from({ length: n }, (_, i) => ({ label: 'o' + i, description: 'd' }))
+  h.onMux(mux({ type: 'question/requested', sessionId: 's5', questions: [{ id: 'q1', question: '选哪个？', options: opts(3) }] }, 'r1'))
+  h.onMux(mux({ type: 'question/requested', sessionId: 's5', questions: [{ id: 'q2', question: '多选', options: opts(2), multiSelect: true }] }, 'r2'))
+  h.onMux(mux({ type: 'question/requested', sessionId: 's5', questions: [{ id: 'q3', question: '太多', options: opts(4) }] }, 'r3'))
+  h.onMux(mux({ type: 'question/requested', sessionId: 's5', questions: [{ id: 'q4', question: 'a', options: opts(2) }, { id: 'q5', question: 'b' }] }, 'r4'))
+  assert.deepEqual(out.map((e) => [e.qid, e.opts]), [['q1', ['o0', 'o1', 'o2']], ['q2', undefined], ['q3', undefined], ['q4', undefined]])
+})
+
+test('external (Claude Code / Codex) asks survive DSH reconnects and replay to phones', () => {
+  const h = hub()
+  const out = []
+  h.emit = ((orig) => (e) => { out.push(orig.call(h, e)); return e })(h.emit)
+  h.externalAsk({ id: 'x1', s: 'agent:claude:a', title: 'Claude Code · shop', rpc: 'agent:x1', tool: 'Bash', what: 'npm test', detail: '' })
+  h.prevAsks = new Map(h.asks) // what connect() does on a DSH mux reconnect
+  h.settleReplay()
+  assert.deepEqual(out.map((e) => e.t), ['ask']) // not withdrawn by the DSH replay
+  const { req, res, frames } = fakeSse()
+  h.started = true
+  h.subscribe(req, res, {})
+  assert.ok(frames.some((f) => f.t === 'ask' && f.id === 'x1' && f.replay))
+  h.externalAskDone('x1', 'allowed-once')
+  h.externalAskDone('x1', 'allowed-once') // idempotent
+  assert.deepEqual(out.map((e) => e.t), ['ask', 'askDone'])
+  req.emit('close')
+})
+
 function fakeSse() {
   const req = new EventEmitter()
   const frames = []

@@ -27,6 +27,8 @@
  *                            file (transcripts.js), which is then watched for changes
  *   POST /m/api/agents/prompt    continue a session from the phone {s, text}
  *   POST /m/api/agents/mode  auto | phone | pc
+ *   GET  /m/api/app/latest   the Android app build this PC offers (version, SHA-256),
+ *   GET  /m/api/app/apk      and the APK itself: the app updates itself from here
  *
  * This module talks to DSH only through its public loopback wire protocol
  * (POST /api/<method>, WS /api/events.mux|host), exactly like DSH's own web
@@ -56,7 +58,8 @@ import { AgentHub, SOURCES, resolveBins } from './agents.js'
 import { createPresence } from './presence.js'
 import { foldFile, recentFiles, headMeta } from './transcripts.js'
 
-const WWW = path.join(path.dirname(fileURLToPath(import.meta.url)), 'www')
+const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
+const WWW = path.join(PLUGIN_DIR, 'www')
 
 /** The only DSH methods a phone may invoke through /m/api/rpc. */
 const RPC_ALLOW = new Set([
@@ -149,11 +152,13 @@ function readJson(req, limit) {
 }
 
 /**
- * @param {{ apiPort: () => number, servePort?: () => number, log?: (msg: string) => void, trustedHosts?: string[], pushDir?: string }} opts
+ * @param {{ apiPort: () => number, servePort?: () => number, log?: (msg: string) => void, trustedHosts?: string[], pushDir?: string, appApk?: string }} opts
  *   servePort: where /m itself is served, when that is not DSH's port (dev.mjs); hooks post there.
+ *   appApk: the APK offered for in-app updates (build.sh writes <apk>.json beside it); default
+ *   android/out/DSH.apk, then the newest android/out/dsh-pager-v*.apk of this repo.
  * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
  */
-export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir }) {
+export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk }) {
   // Fail the load loudly, as DSH does, rather than 403 every phone request later.
   const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
   if (badHost !== undefined) throw new Error(`dsh-pager: trustedHosts entry ${JSON.stringify(badHost)} is not a bare host[:port] authority`)
@@ -354,6 +359,26 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     return { ...f, hasMore: Boolean(v.hasMore), title: f.title || (typeof pv.title === 'string' ? pv.title : undefined) }
   }
 
+  // ---- app self-update -------------------------------------------------------
+
+  /** The APK to offer and its build.sh metadata, or null when there is none. */
+  function appBuild() {
+    let files = appApk ? [appApk] : []
+    if (!appApk) {
+      const out = path.join(PLUGIN_DIR, '..', 'android', 'out')
+      let pub = []
+      try { pub = fs.readdirSync(out).filter((f) => /^dsh-pager-v[\d.]+\.apk$/.test(f)).map((f) => path.join(out, f)) } catch {}
+      files = [path.join(out, 'DSH.apk'), ...pub.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)]
+    }
+    for (const f of files) {
+      try {
+        const meta = JSON.parse(fs.readFileSync(f + '.json', 'utf8'))
+        if (Number.isInteger(meta.versionCode) && /^[0-9a-f]{64}$/.test(meta.sha256)) return { file: f, ...meta }
+      } catch {}
+    }
+    return null
+  }
+
   // ---- result viewer --------------------------------------------------------
 
   let wsCache = null
@@ -505,6 +530,15 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
         const info = agentInfo(b.s || '')
         if (!info) throw Object.assign(new Error('找不到这个会话'), { status: 404, code: 'not-found' })
         return json(req, res, 200, { ok: true, value: agents.prompt(info, b.text, { spawnImpl: spawn, bins }) })
+      }
+      if ((route === 'app/latest' || route === 'app/apk') && !isPost) {
+        const b = appBuild()
+        if (!b) throw Object.assign(new Error('这台电脑上没有可用的 App 安装包'), { status: 404, code: 'no-apk' })
+        if (route === 'app/latest') return json(req, res, 200, { ok: true, value: { versionCode: b.versionCode, versionName: b.versionName, sha256: b.sha256, size: b.size } })
+        const st = fs.statSync(b.file)
+        res.writeHead(200, { 'content-type': 'application/vnd.android.package-archive', 'content-length': st.size, 'cache-control': 'no-store', 'content-disposition': `attachment; filename="${path.basename(b.file)}"` })
+        fs.createReadStream(b.file).on('error', () => res.destroy()).pipe(res)
+        return
       }
       if (route === 'agents/mode' && isPost) { agents.setMode((await readJson(req, 4096)).mode); return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode } }) }
       if (route === 'push/key' && !isPost) return json(req, res, 200, { ok: true, value: { publicKey: push.publicKey(), devices: push.list().length } })

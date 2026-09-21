@@ -211,7 +211,10 @@ export class NotifyHub {
         return
       case 'question/requested': {
         const first = (f.questions || [])[0] || {}
-        const q = { t: 'q', s, title: this.title(s), rpc: env.rpcId, text: first.question || '有问题需要你回答', count: (f.questions || []).length }
+        const q = { t: 'q', s, title: this.title(s), rpc: env.rpcId, text: first.question || '有问题需要你回答', count: (f.questions || []).length, qid: first.id }
+        // One single-choice question with up to three options fits on the notification itself.
+        const opts = Array.isArray(first.options) ? first.options.map((o) => o && o.label).filter((l) => typeof l === 'string' && l) : []
+        if (q.count === 1 && !first.multiSelect && opts.length && opts.length <= 3) q.opts = opts
         const known = this.qs.has(env.rpcId) || (this.prevQs && this.prevQs.has(env.rpcId))
         this.qs.set(env.rpcId, q)
         if (!known) this.emit(q)

@@ -126,6 +126,7 @@ input, textarea { font: inherit; color: inherit; }
 .tag.ask { color: var(--warn); background: var(--warn-soft); }
 .alert { display: flex; align-items: center; gap: 10px; margin: 0 12px 10px; padding: 12px 14px; border-radius: 14px; background: var(--warn-soft); color: var(--warn); font-size: 14px; font-weight: 600; width: calc(100% - 24px); text-align: left; }
 .alert span { flex: 1; }
+.alert.upd { background: var(--accent-soft); color: var(--accent); }
 .sec-row { display: flex; align-items: center; justify-content: space-between; }
 .secbtn { display: inline-flex; align-items: center; gap: 2px; font-size: 12.5px; font-weight: 600; color: var(--accent); padding: 2px 0 2px 8px; }
 .secbtn:active { opacity: 0.6; }

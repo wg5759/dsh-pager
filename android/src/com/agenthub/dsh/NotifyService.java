@@ -4,6 +4,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.app.RemoteInput;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -13,9 +14,11 @@ import android.graphics.drawable.Icon;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
@@ -45,6 +48,13 @@ public class NotifyService extends Service {
     static final String ACTION_ALLOW = "com.agenthub.dsh.ALLOW";
     static final String ACTION_DENY = "com.agenthub.dsh.DENY";
     static final String ACTION_RECONNECT = "com.agenthub.dsh.RECONNECT";
+    /** Pick one option of a question, straight from the notification. */
+    static final String ACTION_ANSWER = "com.agenthub.dsh.ANSWER";
+    /** Type the answer to a question (RemoteInput). */
+    static final String ACTION_ANSWER_TEXT = "com.agenthub.dsh.ANSWER_TEXT";
+    /** Type the next instruction under a "done" notice (RemoteInput). */
+    static final String ACTION_REPLY = "com.agenthub.dsh.REPLY";
+    static final String KEY_TEXT = "text";
     static final String CH_ALERT = "alert";
     static final String CH_DONE = "done";
     static final String CH_BG = "bg";
@@ -116,10 +126,15 @@ public class NotifyService extends Service {
 
     @Override
     public int onStartCommand(Intent i, int flags, int startId) {
-        if (i != null && (ACTION_ALLOW.equals(i.getAction()) || ACTION_DENY.equals(i.getAction()))) {
-            final Intent in = i;
+        String a = i == null ? null : i.getAction();
+        final Intent in = i;
+        if (ACTION_ALLOW.equals(a) || ACTION_DENY.equals(a)) {
             new Thread(() -> answer(in), "dsh-answer").start();
-        } else if (i != null && ACTION_RECONNECT.equals(i.getAction())) {
+        } else if (ACTION_ANSWER.equals(a) || ACTION_ANSWER_TEXT.equals(a)) {
+            new Thread(() -> answerQuestion(in), "dsh-answer").start();
+        } else if (ACTION_REPLY.equals(a)) {
+            new Thread(() -> reply(in), "dsh-reply").start();
+        } else if (ACTION_RECONNECT.equals(a)) {
             alerted.clear();
             kick();
         }
@@ -248,6 +263,9 @@ public class NotifyService extends Service {
             case "err":
                 if (!appVisible) postError(f);
                 break;
+            case "info": // e.g. Claude Code waiting at the PC for a dialog the phone could not take
+                if (!appVisible) simple(idFor("i:" + f.optString("s")), CH_ALERT, f.optString("title"), f.optString("text"), f.optString("s"));
+                break;
             default:
                 break;
         }
@@ -295,10 +313,11 @@ public class NotifyService extends Service {
         String what = f.optString("what", f.optString("tool"));
         String detail = f.optString("detail", "");
         String text = what + (detail.isEmpty() || detail.equals(what) ? "" : "\n" + clip(detail, 300));
+        // Allowing makes the PC act: the phone must be unlocked first. Denying is always safe.
         Notification.Builder b = base(CH_ALERT, "需要你确认 · " + f.optString("title"), text, f.optString("s"), nid)
                 .setCategory(Notification.CATEGORY_REMINDER)
-                .addAction(new Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat), "拒绝", act(ACTION_DENY, f, nid)).build())
-                .addAction(new Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat), "允许", act(ACTION_ALLOW, f, nid)).build());
+                .addAction(action("拒绝", act(ACTION_DENY, f, nid), false, null))
+                .addAction(action("允许", act(ACTION_ALLOW, f, nid), true, null));
         nm.notify(nid, b.build());
     }
 
@@ -306,8 +325,19 @@ public class NotifyService extends Service {
         int nid = idFor("q:" + f.optString("rpc"));
         int count = f.optInt("count", 1);
         String text = f.optString("text") + (count > 1 ? "（共 " + count + " 个问题）" : "");
-        nm.notify(nid, base(CH_ALERT, "DSH 在问你 · " + f.optString("title"), text, f.optString("s"), nid)
-                .setCategory(Notification.CATEGORY_REMINDER).build());
+        Notification.Builder b = base(CH_ALERT, "DSH 在问你 · " + f.optString("title"), text, f.optString("s"), nid)
+                .setCategory(Notification.CATEGORY_REMINDER);
+        JSONArray opts = f.optJSONArray("opts");
+        if (opts != null && opts.length() > 0) {
+            // One single-choice question: its options become buttons (Android shows at most three).
+            for (int k = 0; k < opts.length() && k < 3; k++) {
+                String label = opts.optString(k);
+                b.addAction(action(clip(label, 20), input(ACTION_ANSWER, f, nid, k + 1).putExtra("label", label), true, null));
+            }
+        } else if (count == 1) {
+            b.addAction(action("回复", input(ACTION_ANSWER_TEXT, f, nid, 4), true, "输入你的回答"));
+        }
+        nm.notify(nid, b.build());
     }
 
     private void postDone(JSONObject f) {
@@ -316,7 +346,45 @@ public class NotifyService extends Service {
         long ms = f.optLong("ms", 0);
         String preview = f.optString("preview", "");
         String text = (ms > 0 ? "已完成 · " + dur(ms) : "已完成") + (preview.isEmpty() ? "" : "\n" + preview);
-        nm.notify(nid, base(CH_DONE, f.optString("title"), text, s, nid).setCategory(Notification.CATEGORY_STATUS).build());
+        nm.notify(nid, base(CH_DONE, f.optString("title"), text, s, nid).setCategory(Notification.CATEGORY_STATUS)
+                .addAction(action("回复", input(ACTION_REPLY, f, nid, 5), true, "接着让它做什么")).build());
+    }
+
+    /**
+     * A notification button. `unlock`: Android 12+ asks to unlock the phone before
+     * running it. `hint`: a text-input button (RemoteInput) with this placeholder.
+     */
+    private Notification.Action action(String title, Object target, boolean unlock, String hint) {
+        PendingIntent pi = target instanceof PendingIntent ? (PendingIntent) target : pending((Intent) target, hint != null);
+        Notification.Action.Builder b = new Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat), title, pi);
+        if (hint != null) b.addRemoteInput(new RemoteInput.Builder(KEY_TEXT).setLabel(hint).build());
+        if (unlock && Build.VERSION.SDK_INT >= 31) b.setAuthenticationRequired(true);
+        return b.build();
+    }
+
+    /** The service intent behind an answer / reply button; `slot` keeps request codes distinct per button. */
+    private Intent input(String action, JSONObject f, int nid, int slot) {
+        return new Intent(this, NotifyService.class)
+                .setAction(action)
+                .putExtra("rpc", f.optString("rpc"))
+                .putExtra("s", f.optString("s"))
+                .putExtra("qid", f.optString("qid"))
+                .putExtra("title", f.optString("title"))
+                .putExtra("nid", nid)
+                .putExtra("slot", slot);
+    }
+
+    private PendingIntent pending(Intent i, boolean typed) {
+        int rc = i.getIntExtra("nid", 0) * 8 + i.getIntExtra("slot", 0);
+        // A RemoteInput button must be mutable: the system adds the typed text to it.
+        int mut = typed ? (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0) : PendingIntent.FLAG_IMMUTABLE;
+        return PendingIntent.getForegroundService(this, rc, i, mut | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    private static String typed(Intent in) {
+        Bundle r = RemoteInput.getResultsFromIntent(in);
+        CharSequence t = r == null ? null : r.getCharSequence(KEY_TEXT);
+        return t == null ? "" : t.toString().trim();
     }
 
     private void postError(JSONObject f) {
@@ -364,6 +432,55 @@ public class NotifyService extends Service {
             nm.cancel(nid);
         } catch (Exception e) {
             simple(nid, CH_ALERT, "没有提交成功", "点开 App 处理这个确认", in.getStringExtra("s"));
+        }
+    }
+
+    /** Answer a question from the notification: one option, or typed text. */
+    private void answerQuestion(Intent in) {
+        int nid = in.getIntExtra("nid", 0);
+        String s = in.getStringExtra("s");
+        try {
+            JSONObject ans = new JSONObject().put("id", in.getStringExtra("qid"));
+            String label = in.getStringExtra("label");
+            if (ACTION_ANSWER.equals(in.getAction()) && label != null) {
+                ans.put("selected", new JSONArray().put(label));
+            } else {
+                String text = typed(in);
+                if (text.isEmpty()) {
+                    nm.cancel(nid);
+                    return;
+                }
+                ans.put("selected", new JSONArray()).put("custom", text);
+            }
+            JSONObject value = new JSONObject().put("sessionId", s).put("answer", new JSONObject().put("answers", new JSONArray().put(ans)));
+            post("/m/api/respond", new JSONObject().put("rpcId", in.getStringExtra("rpc")).put("result", new JSONObject().put("ok", true).put("value", value)));
+            nm.cancel(nid);
+        } catch (Exception e) {
+            simple(nid, CH_ALERT, "没有提交成功", "点开 App 回答这个问题", s);
+        }
+    }
+
+    /** The next instruction typed under a "done" notice: DSH sessions and Claude Code / Codex alike. */
+    private void reply(Intent in) {
+        int nid = in.getIntExtra("nid", 0);
+        String s = in.getStringExtra("s");
+        String text = typed(in);
+        if (text.isEmpty() || s == null) {
+            nm.cancel(nid);
+            return;
+        }
+        try {
+            if (s.startsWith("agent:")) {
+                post("/m/api/agents/prompt", new JSONObject().put("s", s).put("text", text));
+            } else {
+                JSONObject payload = new JSONObject().put("sessionId", s).put("mode", "queue")
+                        .put("content", new JSONArray().put(new JSONObject().put("type", "text").put("text", text)));
+                post("/m/api/rpc", new JSONObject().put("method", "session.prompt").put("payload", payload));
+            }
+            // Re-post without the input: this is also what stops the notification's reply spinner.
+            simple(nid, CH_DONE, in.getStringExtra("title"), "已发送：" + clip(text, 120), s);
+        } catch (Exception e) {
+            simple(nid, CH_ALERT, "没有发出去", "点开 App 再发一次：" + clip(text, 80), s);
         }
     }
 

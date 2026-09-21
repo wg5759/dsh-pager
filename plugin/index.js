@@ -42,6 +42,7 @@ export function apply(ctx, config) {
     log: (msg) => process.stdout.write(`[dsh-pager] ${msg}\n`),
     trustedHosts,
     pushDir: (config && config.pushDir) || undefined,
+    appApk: (config && config.appApk) || undefined,
   })
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/m', handler: mobile.handle }), 'dsh-mobile: /m route')
   ctx.effect(() => () => mobile.close(), 'dsh-mobile: live streams')

@@ -343,6 +343,11 @@
       return (s.title || '').toLowerCase().indexOf(q) >= 0 || wsTitle(s.w).toLowerCase().indexOf(q) >= 0
     }).sort(function (a, b) { return b.at - a.at })
     var h = ''
+    if (S.appUpdate) {
+      h += S.appUpdate.self
+        ? '<button class="alert upd" data-update>' + ic('down') + '<span>App 有新版本 ' + esc(S.appUpdate.versionName) + '，点这里更新</span>' + ic('chev', 's') + '</button>'
+        : '<div class="alert upd">' + ic('down') + '<span>App 可以升级到 ' + esc(S.appUpdate.versionName) + '：这一次需要在电脑上安装，之后就能在手机上直接更新</span></div>'
+    }
     var waiting = S.asks.size + S.qs.size
     if (waiting) {
       var first = (S.asks.values().next().value || S.qs.values().next().value).s
@@ -1124,7 +1129,8 @@
       c.w = wid
       S.chats.set(c.id, c)
       openChat(c.id)
-      setTimeout(function () { el.input.focus() }, 380)
+      if (S.share) { fillShare(c.id, S.share); S.share = null }
+      else setTimeout(function () { el.input.focus() }, 380)
     }, function (e) { toast('创建失败：' + e.message, 'err') })
   }
   function modelSheet() {
@@ -1274,6 +1280,7 @@
 
   el.rows.addEventListener('click', function (e) {
     if (e.target.closest('[data-mode]')) { modeSheet(); return }
+    if (e.target.closest('[data-update]')) { buzz(); location.href = 'dshapp://update'; return }
     var b = e.target.closest('[data-open]')
     if (b) openChat(b.dataset.open)
   })
@@ -1537,6 +1544,57 @@
 
   setInterval(function () { if (!S.cur && document.visibilityState === 'visible') scheduleHome() }, 60000)
 
+  // ------------------------------------------------------------ Android shell hooks
+  // In-app update: the shell reports "DSHApp/<version>+<code>" (1.3.0+); older shells
+  // cannot update themselves and only get a hint.
+  var APP_CODE = +((/DSHApp\/[\d.]+\+(\d+)/.exec(navigator.userAgent) || [])[1] || 0)
+  function checkAppUpdate() {
+    if (!IN_APP) return
+    get('/m/api/app/latest').then(function (v) {
+      if (APP_CODE ? v.versionCode > APP_CODE : true) { S.appUpdate = { versionName: v.versionName, self: APP_CODE > 0 }; scheduleHome() }
+    }, function () {})
+  }
+  window.dshToast = function (msg, kind) { toast(msg, kind) }
+
+  // "Share to DSH" from another app: pick the conversation, then review in the composer.
+  function b64Blob(b64, type) {
+    var bin = atob(b64), a = new Uint8Array(bin.length)
+    for (var i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i)
+    return new Blob([a], { type: type })
+  }
+  function fillShare(id, share) {
+    el.input.value = share.text
+    S.att = isAgent(id) ? [] : share.imgs.slice(0, 6)
+    drawThumbs(); autosize(); syncSend()
+    if (isAgent(id) && share.imgs.length) toast('Claude Code / Codex 会话只能发文字，图片没带上')
+    setTimeout(function () { el.input.focus() }, 380)
+  }
+  window.dshShare = function (p) {
+    if (!p) return
+    var share = {
+      text: [p.subject, p.text].filter(Boolean).join('\n').trim(),
+      imgs: (p.images || []).slice(0, 6).map(function (im) { return { url: URL.createObjectURL(b64Blob(im.b64, im.type || 'image/jpeg')), b64: im.b64, type: im.type || 'image/jpeg', name: im.name || 'shared.jpg' } }),
+    }
+    var dsh = S.sessions.slice().sort(function (a, b) { return b.at - a.at }).slice(0, 6)
+    var ags = S.agents.sessions.slice(0, 3)
+    var what = (share.imgs.length ? share.imgs.length + ' 张图片' : '') + (share.text ? (share.imgs.length ? ' · ' : '') + share.text.slice(0, 40) : '')
+    closeAllOverlays().then(function () {
+      openSheet('<div class="sh-h">分享到 DSH<small>' + esc(what || '内容') + '</small></div><div class="sh-b">' +
+        '<button class="opt-row" data-new><span class="ico">' + ic('plus', 's') + '</span><span class="mid"><b>新对话</b><small>选一个工作区</small></span>' + ic('chev', 's') + '</button>' +
+        dsh.map(function (s) { return '<button class="opt-row" data-sid="' + esc(s.id) + '"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>' + esc(s.title || '未命名对话') + '</b><small>' + esc(wsTitle(s.w)) + '</small></span></button>' }).join('') +
+        ags.map(function (a) { return '<button class="opt-row" data-sid="' + esc(a.id) + '"><span class="ico">' + ic('execute', 's') + '</span><span class="mid"><b>' + esc(a.title || a.project || a.name) + '</b><small>' + esc(a.name + (a.project ? ' · ' + a.project : '')) + '</small></span></button>' }).join('') +
+        '</div>')
+      el.sheet.onclick = function (e) {
+        var b = e.target.closest('[data-sid],[data-new]')
+        if (!b) return
+        closeOverlay().then(function () {
+          if (b.dataset.sid) { openChat(b.dataset.sid); fillShare(b.dataset.sid, share) }
+          else { S.share = share; newSheet() }
+        })
+      }
+    })
+  }
+
   // ------------------------------------------------------------ boot
   // The Android shell calls this when a notification is tapped.
   window.dshOpen = function (id) {
@@ -1552,5 +1610,6 @@
   if (cached && cached.sessions) { try { applyBoot(cached); S.run = new Set() } catch (e) {} }
   renderHome()
   loadBoot().then(function () { if (deep && (S.byId[deep] || isAgent(deep))) openChat(deep) }, function (e) { toast(e.message, 'err') })
+  checkAppUpdate()
   connect()
 })()

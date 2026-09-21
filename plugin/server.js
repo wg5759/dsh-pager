@@ -54,7 +54,7 @@ import { WebPush, noticePayload, defaultDir } from './push.js'
 import { spawn } from 'node:child_process'
 import { AgentHub, SOURCES, resolveBins } from './agents.js'
 import { createPresence } from './presence.js'
-import { foldFile, recentFiles } from './transcripts.js'
+import { foldFile, recentFiles, headMeta } from './transcripts.js'
 
 const WWW = path.join(path.dirname(fileURLToPath(import.meta.url)), 'www')
 
@@ -205,7 +205,9 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       let m = diskMeta.get(f.file)
       if (!m || m.size !== f.size || m.mtime !== f.at) {
         m = { size: f.size, mtime: f.at, title: '', cwd: '' }
-        try { const x = foldFile(f.file, f.src, 256 * 1024); m.title = x.title; m.cwd = x.cwd } catch {}
+        // Folder and first prompt from the head; Claude Code's own titles are rewritten near the end.
+        try { const h = headMeta(f.file, f.src); m.cwd = h.cwd; m.title = h.title } catch {}
+        if (f.src === 'claude') { try { const x = foldFile(f.file, f.src, 256 * 1024); m.title = x.title || m.title; m.cwd = m.cwd || x.cwd } catch {} }
         diskMeta.set(f.file, m)
       }
       return { id: `agent:${f.src}:${f.id}`, src: f.src, sid: f.id, name: SOURCES[f.src], project: baseName(m.cwd), cwd: m.cwd, title: m.title, at: f.at, run: false, asks: 0, file: f.file }

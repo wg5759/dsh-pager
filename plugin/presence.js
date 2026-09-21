@@ -14,8 +14,11 @@
 
 import { spawn } from 'node:child_process'
 
-const SCRIPT = `
+const script = (parent) => `
 $ErrorActionPreference = 'Stop'
+$parent = ${Number(parent) || 0}
+# Windows reuses PIDs quickly: the parent is "alive" only while the same PID has the same start time.
+$born = if ($parent) { (Get-Process -Id $parent).StartTime } else { $null }
 Add-Type @'
 using System; using System.Runtime.InteropServices;
 public static class DshIdle {
@@ -25,6 +28,11 @@ public static class DshIdle {
 }
 '@
 while ($true) {
+  # Writing to a dead parent's pipe does not always fail: leave explicitly when it is gone.
+  if ($parent) {
+    $p = Get-Process -Id $parent -ErrorAction SilentlyContinue
+    if (-not $p -or $p.StartTime -ne $born) { exit }
+  }
   $locked = [int][bool](Get-Process LogonUI -ErrorAction SilentlyContinue)
   [Console]::Out.WriteLine(([string][DshIdle]::Ms()) + ' ' + $locked)
   [Console]::Out.Flush()
@@ -43,7 +51,7 @@ export function createPresence({ log = () => {}, platform = process.platform, sp
 
   function start() {
     if (closed || platform !== 'win32' || child || restarts > 3) return
-    child = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', SCRIPT], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    child = spawnImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script(process.pid)], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
     let buf = ''
     child.stdout.on('data', (d) => {
       buf += d

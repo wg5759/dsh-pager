@@ -190,6 +190,23 @@ export function foldFile(file, src, bytes = TAIL_BYTES) {
 }
 
 /**
+ * Folder and first prompt from the head of a session file: Codex writes its
+ * working folder only in the first line, which a tail read misses.
+ */
+export function headMeta(file, src, bytes = 128 * 1024) {
+  const fd = fs.openSync(file, 'r')
+  let text
+  try {
+    const buf = Buffer.alloc(Math.min(bytes, fs.fstatSync(fd).size))
+    fs.readSync(fd, buf, 0, buf.length, 0)
+    text = buf.toString('utf8')
+  } finally { fs.closeSync(fd) }
+  const f = src === 'codex' ? foldCodex(parseLines(text)) : foldClaude(parseLines(text))
+  const cwd = f.cwd || (src === 'claude' ? (parseLines(text).find((e) => e && e.cwd) || {}).cwd || '' : '')
+  return { cwd, title: f.title }
+}
+
+/**
  * Recently written session files of both tools, newest first, for sessions the
  * hooks have not told us about (before installing them, or after a restart).
  */

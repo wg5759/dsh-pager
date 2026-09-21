@@ -19,6 +19,11 @@
  *   POST /m/api/push/subscribe | unsubscribe | test
  *                            register the installed web app (iPhone) for the
  *                            same notices the Android app gets (see push.js)
+ *   POST /m/api/agents/hook  Claude Code / Codex hook events (tools/pager-hook.mjs;
+ *                            token from ~/.dsh-pager/hook.json; see agents.js)
+ *   GET  /m/api/agents       their recent sessions, pending approvals, routing mode
+ *   GET  /m/api/agents/history   one of their sessions as chat items
+ *   POST /m/api/agents/mode  auto | phone | pc
  *
  * This module talks to DSH only through its public loopback wire protocol
  * (POST /api/<method>, WS /api/events.mux|host), exactly like DSH's own web
@@ -42,7 +47,9 @@ import { fileURLToPath } from 'node:url'
 import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue, fullCall, resultCallId } from './fold.js'
 import { NotifyHub } from './notify.js'
 import { confine, describe as describeFile, parseRange, MEDIA } from './files.js'
-import { WebPush, noticePayload } from './push.js'
+import { WebPush, noticePayload, defaultDir } from './push.js'
+import { AgentHub } from './agents.js'
+import { createPresence } from './presence.js'
 
 const WWW = path.join(path.dirname(fileURLToPath(import.meta.url)), 'www')
 
@@ -137,10 +144,11 @@ function readJson(req, limit) {
 }
 
 /**
- * @param {{ apiPort: () => number, log?: (msg: string) => void, trustedHosts?: string[], pushDir?: string }} opts
+ * @param {{ apiPort: () => number, servePort?: () => number, log?: (msg: string) => void, trustedHosts?: string[], pushDir?: string }} opts
+ *   servePort: where /m itself is served, when that is not DSH's port (dev.mjs); hooks post there.
  * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
  */
-export function createMobile({ apiPort, log = () => {}, trustedHosts = [], pushDir }) {
+export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir }) {
   // Fail the load loudly, as DSH does, rather than 403 every phone request later.
   const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
   if (badHost !== undefined) throw new Error(`dsh-pager: trustedHosts entry ${JSON.stringify(badHost)} is not a bare host[:port] authority`)
@@ -155,11 +163,37 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [], pushD
   const hubTimer = setTimeout(() => hub.start(), 3000)
 
   // Installed web apps (iPhone) get the same notices through Web Push.
-  const push = new WebPush({ dir: pushDir, log })
+  const dataDir = pushDir || defaultDir()
+  const push = new WebPush({ dir: dataDir, log })
   hub.onNotice((ev) => {
     const n = noticePayload(ev)
     if (n && push.list().length) push.broadcast(n.payload, n).catch((err) => log(`push failed: ${err && err.message}`))
   })
+
+  // Claude Code / Codex on this PC: their hooks post here (see agents.js).
+  const presence = createPresence({ log })
+  const agents = new AgentHub({
+    notify: { ask: (a) => hub.externalAsk(a), askDone: (id, o) => hub.externalAskDone(id, o), emit: (ev) => hub.emit(ev) },
+    presence, dir: dataDir, log,
+  })
+  // tools/pager-hook.mjs reads where to post and the shared token from here.
+  let hookToken = ''
+  function writeHookConfig() {
+    const file = path.join(dataDir, 'hook.json')
+    try { hookToken = JSON.parse(fs.readFileSync(file, 'utf8')).token || '' } catch {}
+    if (!/^[0-9a-f]{64}$/.test(hookToken)) hookToken = crypto.randomBytes(32).toString('hex')
+    try {
+      fs.mkdirSync(dataDir, { recursive: true })
+      fs.writeFileSync(file, JSON.stringify({ url: `http://127.0.0.1:${servePort()}/m/api/agents/hook`, token: hookToken }, null, 1), { mode: 0o600 })
+    } catch (err) { log(`agents: cannot write hook.json: ${err.message}`) }
+  }
+  const hookTimer = setTimeout(writeHookConfig, 3000)
+  function hookCaller(req) {
+    const got = Buffer.from(String(req.headers['x-pager-token'] || ''))
+    const want = Buffer.from(hookToken)
+    // Relayed phone traffic also arrives from 127.0.0.1: the token is the gate, and browsers (Origin) never are callers.
+    return want.length === 64 && got.length === want.length && crypto.timingSafeEqual(got, want) && !req.headers.origin
+  }
 
   async function dsh(method, payload, timeoutMs = 30000, rpcId = crypto.randomUUID()) {
     const res = await fetch(`${base()}/api/${method}`, {
@@ -265,6 +299,11 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [], pushD
   let wsCache = null
   async function rootOf(sessionId) {
     if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400, code: 'bad-request' })
+    if (sessionId.startsWith('agent:')) {
+      const s = agents.get(sessionId)
+      if (!s || !s.cwd) throw Object.assign(new Error('不知道这个会话的项目目录'), { status: 404, code: 'no-workspace' })
+      return s.cwd
+    }
     if (!wsCache || Date.now() - wsCache.at > 10000) wsCache = { at: Date.now(), v: await value('workspace.list', {}) }
     const w = wsCache.v.items.find((x) => (x.sessionIds || []).includes(sessionId))
     if (!w || !w.path) throw Object.assign(new Error('这个对话不属于任何工作区，没有可查看的文件'), { status: 404, code: 'no-workspace' })
@@ -362,7 +401,33 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [], pushD
         if (body.method === 'session.prompt' && body.payload) hub.markPhone(body.payload.sessionId)
         return json(req, res, 200, await dsh(body.method, body.payload || {}, body.method === 'session.prompt' ? 180000 : 45000, rpcId))
       }
-      if (route === 'respond' && isPost) return json(req, res, 200, { ok: true, value: await respond(await readJson(req, 1024 * 1024)) })
+      if (route === 'respond' && isPost) {
+        const body = await readJson(req, 1024 * 1024)
+        if (typeof body.rpcId === 'string' && body.rpcId.startsWith('agent:')) {
+          const v = (body.result && body.result.value) || {}
+          return json(req, res, 200, { ok: true, value: agents.decide(v.approvalId || body.rpcId.slice(6), v.outcome, { remember: Boolean(v.remember) }) })
+        }
+        return json(req, res, 200, { ok: true, value: await respond(body) })
+      }
+      if (route === 'agents/hook' && isPost) {
+        if (!hookCaller(req)) return json(req, res, 403, { ok: false, error: { code: 'forbidden', message: 'bad hook token' } })
+        const ev = await readJson(req, 16 * 1024 * 1024)
+        // A held PermissionRequest answers when the phone does; the tool closing the hook cancels it.
+        req.socket.setTimeout(0)
+        const ac = new AbortController()
+        res.on('close', () => { if (!res.writableEnded) ac.abort() })
+        const answer = await agents.handle(url.searchParams.get('src'), ev, { signal: ac.signal })
+        if (!res.destroyed) json(req, res, 200, answer)
+        return
+      }
+      if (route === 'agents' && !isPost) return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode, away: agents.away(), sessions: agents.list(), asks: agents.asks() } })
+      if (route === 'agents/history' && !isPost) {
+        const s = agents.get(url.searchParams.get('s'))
+        if (!s) throw Object.assign(new Error('这个会话的记录已经不在了（电脑重启后只保留新的事件）'), { status: 404, code: 'not-found' })
+        const items = s.timeline.map((it) => ({ ...it }))
+        return json(req, res, 200, { ok: true, value: { items, partial: null, firstSeq: items.length ? items[0].seq : -1, lastSeq: s.seq, hasMore: false, title: s.title } })
+      }
+      if (route === 'agents/mode' && isPost) { agents.setMode((await readJson(req, 4096)).mode); return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode } }) }
       if (route === 'push/key' && !isPost) return json(req, res, 200, { ok: true, value: { publicKey: push.publicKey(), devices: push.list().length } })
       if (route === 'push/subscribe' && isPost) {
         const b = await readJson(req, 16 * 1024)
@@ -388,7 +453,7 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [], pushD
   function events(req, res) {
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' })
     res.write('retry: 2000\n\n')
-    const b = new Bridge(res, `ws://127.0.0.1:${apiPort()}`, log, () => bridges.delete(b))
+    const b = new Bridge(res, `ws://127.0.0.1:${apiPort()}`, log, () => bridges.delete(b), agents)
     bridges.add(b)
     req.on('close', () => b.close())
   }
@@ -412,6 +477,9 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [], pushD
 
   function close() {
     clearTimeout(hubTimer)
+    clearTimeout(hookTimer)
+    agents.close()
+    presence.close()
     hub.stop()
     for (const b of [...bridges]) b.close()
   }
@@ -432,10 +500,11 @@ export function createMobile({ apiPort, log = () => {}, trustedHosts = [], pushD
  * and the fresh mux replays still-pending approvals/questions.
  */
 class Bridge {
-  constructor(res, wsBase, log, onClose) {
+  constructor(res, wsBase, log, onClose, agents) {
     this.res = res
     this.log = log
     this.onClose = onClose
+    this.agents = agents
     this.closed = false
     this.pending = new Map()
     this.timer = null
@@ -450,6 +519,20 @@ class Bridge {
     // and the phone's stall watchdog needs to see the heartbeat.
     this.ping = setInterval(() => this.send({ t: 'p' }), 15000)
     this.send({ t: 'hello', at: Date.now() })
+    // Claude Code / Codex: their approvals use the same ask frames; anything else just says "refetch".
+    if (agents) {
+      const askFrame = (a) => ({ t: 'ask', s: a.s, rpc: a.rpc, id: a.id, tool: a.tool, title: a.what, detail: a.detail, why: a.title, remember: a.remember })
+      this.onAgentAsk = (a) => this.send(askFrame(a))
+      this.onAgentDone = (d) => this.send({ t: 'askDone', s: d.s, id: d.id, outcome: d.outcome })
+      this.onAgentChange = () => {
+        if (this.agentT) return
+        this.agentT = setTimeout(() => { this.agentT = null; this.send({ t: 'agents' }) }, 300)
+      }
+      agents.on('ask', this.onAgentAsk)
+      agents.on('askDone', this.onAgentDone)
+      agents.on('change', this.onAgentChange)
+      for (const a of agents.asks()) this.send(askFrame(a))
+    }
   }
 
   open(url, onEnvelope) {
@@ -578,6 +661,12 @@ class Bridge {
     this.closed = true
     clearInterval(this.ping)
     clearTimeout(this.timer)
+    clearTimeout(this.agentT)
+    if (this.agents) {
+      this.agents.off('ask', this.onAgentAsk)
+      this.agents.off('askDone', this.onAgentDone)
+      this.agents.off('change', this.onAgentChange)
+    }
     for (const ws of this.sockets) { try { ws.close() } catch {} }
     try { this.res.end() } catch {}
     this.onClose()

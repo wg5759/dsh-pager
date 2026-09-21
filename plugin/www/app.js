@@ -218,6 +218,7 @@
     run: new Set(), asks: new Map(), qs: new Map(), chats: new Map(),
     filter: store.get('filter', 'all'), query: '', cur: null, booted: false, hellos: 0,
     att: [], drafts: store.get('drafts', {}), status: 'connecting',
+    agents: { mode: 'auto', away: false, sessions: [] },
   }
   var el = {}
   ;['app', 'home', 'chat', 'status', 'chips', 'list', 'rows', 'ptr', 'fab', 'searchBox', 'q', 'cTitle', 'cSub', 'scroller', 'older', 'msgs', 'tail',
@@ -232,7 +233,10 @@
   function cleanTitle(t) { return String(t || '').replace(/\*\*|__|`/g, '').replace(/^\s*(session\s*)?title\s*[:：]\s*/i, '').trim() }
   function wsOf(id) { var s = S.byId[id], c = S.chats.get(id); return (s && s.w) || (c && c.w) || null }
   function wsTitle(w) { return w ? (S.wsById[w] ? S.wsById[w].title : '') : '未归类' }
-  function isRunning(id) { return S.run.has(id) }
+  // Claude Code / Codex sessions on the same PC: ids "agent:<src>:<session>".
+  function isAgent(id) { return typeof id === 'string' && id.indexOf('agent:') === 0 }
+  function agentOf(id) { var a = S.agents.sessions; for (var i = 0; i < a.length; i++) if (a[i].id === id) return a[i]; return null }
+  function isRunning(id) { var a = isAgent(id) && agentOf(id); return S.run.has(id) || Boolean(a && a.run) }
   function pendingCount(id) {
     var n = 0
     S.asks.forEach(function (a) { if (a.s === id) n++ })
@@ -283,6 +287,50 @@
     return '<button class="row" data-open="' + esc(s.id) + '"><div class="mid"><div class="t' + (s.title ? '' : ' none') + '">' + esc(s.title || '未命名对话') +
       '</div><div class="m">' + tag + '<span>' + esc(wsTitle(s.w)) + '</span></div></div><span class="when">' + when(s.at) + '</span></button>'
   }
+  var MODE_SHORT = { auto: '自动', phone: '手机', pc: '电脑' }
+  var MODE_NAME = { auto: '自动', phone: '总是先问手机', pc: '只在电脑上确认' }
+  var MODE_TXT = {
+    auto: '电脑锁屏或 3 分钟没人操作时发到手机，一回到电脑就交还电脑',
+    phone: '先发到手机；20 分钟没回应再交给电脑',
+    pc: '不发到手机，只在电脑上弹确认框',
+  }
+  function agentRowHtml(a) {
+    var tag = pendingCount(a.id) ? '<span class="tag ask">待确认</span>' : a.run ? '<span class="tag run"><i></i>运行中</span>' : ''
+    return '<button class="row" data-open="' + esc(a.id) + '"><span class="fic">' + ic('execute', 's') + '</span><div class="mid"><div class="t' + (a.title ? '' : ' none') + '">' + esc(a.title || a.project || a.name) +
+      '</div><div class="m">' + tag + '<span>' + esc(a.name + (a.project ? ' · ' + a.project : '')) + '</span></div></div><span class="when">' + when(a.at) + '</span></button>'
+  }
+  function agentsHtml() {
+    if (S.filter !== 'all' || S.query || !S.agents.sessions.length) return ''
+    return '<div class="sec sec-row">Claude Code / Codex<button class="secbtn" data-mode>确认发到：' + esc(MODE_SHORT[S.agents.mode] || S.agents.mode) + ic('chev', 's') + '</button></div>' +
+      '<div class="grp agents">' + S.agents.sessions.slice(0, 6).map(agentRowHtml).join('') + '</div>'
+  }
+  function loadAgents() {
+    return get('/m/api/agents').then(function (v) {
+      S.agents = v
+      scheduleHome()
+      if (S.cur && isAgent(S.cur)) { renderHead(); syncSend() }
+    }, function () {})
+  }
+  var agentsT = 0
+  function scheduleAgents() {
+    clearTimeout(agentsT)
+    agentsT = setTimeout(function () {
+      loadAgents()
+      var c = S.cur && isAgent(S.cur) && S.chats.get(S.cur)
+      if (c && c.loaded && !c.loading) loadHistory(c)
+    }, 250)
+  }
+  function modeSheet() {
+    var cur = S.agents.mode
+    openSheet('<div class="sh-h">Claude Code / Codex 的确认请求<small>它们要你允许某个操作时，发到哪里</small></div><div class="sh-b">' + ['auto', 'phone', 'pc'].map(function (m) {
+      return '<button class="opt-row' + (m === cur ? ' on' : '') + '" data-m="' + m + '"><span class="ico">' + ic(m === 'pc' ? 'cpu' : 'alert', 's') + '</span><span class="mid"><b>' + MODE_NAME[m] + '</b><small>' + MODE_TXT[m] + '</small></span>' + (m === cur ? ic('check', 'chk') : '') + '</button>'
+    }).join('') + '</div>')
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-m]')
+      if (!b) return
+      post('/m/api/agents/mode', { mode: b.dataset.m }).then(function (v) { S.agents.mode = v.mode; buzz(); closeOverlay(); scheduleHome() }, function (err) { toast(err.message, 'err') })
+    }
+  }
   function renderHome() {
     renderChips()
     if (!S.booted) { el.rows.innerHTML = new Array(7).join('<div class="sk"></div>'); return }
@@ -300,6 +348,7 @@
       var first = (S.asks.values().next().value || S.qs.values().next().value).s
       h += '<button class="alert" data-open="' + esc(first) + '">' + ic('alert') + '<span>' + waiting + ' 个操作等你确认</span>' + ic('chev', 's') + '</button>'
     }
+    h += agentsHtml()
     var groups = [['进行中', []], ['今天', []], ['昨天', []], ['最近 7 天', []], ['更早', []]]
     list.forEach(function (s) { groups[isRunning(s.id) || pendingCount(s.id) ? 0 : bucket(s.at)][1].push(s) })
     groups.forEach(function (g) { if (g[1].length) h += '<div class="sec">' + g[0] + '</div><div class="grp">' + g[1].map(rowHtml).join('') + '</div>' })
@@ -376,7 +425,11 @@
     if (!c) { c = chatState(id); S.chats.set(id, c) }
     if (!fromPop) history.pushState({ v: 'chat', s: id }, '', '#' + enc(id))
     show('chat')
-    el.input.value = S.drafts[id] || ''
+    var ag = isAgent(id)
+    el.input.value = ag ? '' : S.drafts[id] || ''
+    el.input.disabled = ag
+    el.input.placeholder = ag ? '在电脑上继续这个会话（手机发消息即将支持）' : '发消息给 DSH'
+    el.attach.hidden = ag
     autosize()
     S.att = []
     drawThumbs()
@@ -385,7 +438,7 @@
     drawDock()
     syncSend()
     if (!c.loaded && !c.loading) loadHistory(c)
-    loadModel(c)
+    if (!ag) loadModel(c)
   }
   function closeChat() {
     saveDraft()
@@ -593,7 +646,7 @@
     c.err = false
     c.buf = []
     if (c.id === S.cur) renderMsgs(c)
-    return get('/m/api/history?s=' + enc(c.id) + '&n=40').then(function (v) {
+    return get((isAgent(c.id) ? '/m/api/agents/history?s=' : '/m/api/history?s=') + enc(c.id) + '&n=40').then(function (v) {
       c.items = v.items
       c.partial = v.partial
       c.lastSeq = v.lastSeq
@@ -666,10 +719,12 @@
         S.asks.clear()
         S.qs.clear()
         if (S.hellos > 1) resync()
+        loadAgents()
         scheduleHome()
         return
       case 'run': return setRun(f.s, f.on)
       case 'list': return scheduleBoot()
+      case 'agents': return scheduleAgents()
       case 'title': return setTitle(f.s, f.title)
       case 'ask': S.asks.set(f.id, f); buzz(30); return onPending(f.s)
       case 'askDone': { var a = S.asks.get(f.id); S.asks.delete(f.id); return onPending((a && a.s) || f.s) }
@@ -772,13 +827,14 @@
   function renderHead() {
     var c = S.chats.get(S.cur)
     if (!c) return
-    var s = S.byId[c.id]
-    el.cTitle.textContent = (s && s.title) || c.title || '新对话'
+    var s = S.byId[c.id], ag = isAgent(c.id) && agentOf(c.id)
+    el.cTitle.textContent = (ag && (ag.title || ag.project)) || (s && s.title) || c.title || (isAgent(c.id) ? '外部会话' : '新对话')
     var sub = ''
     if (S.status !== 'online') sub += (S.status === 'offline' ? '电脑离线' : '连接中…') + ' · '
     else if (isRunning(c.id)) sub += '<span class="live"><span class="spin s"></span>运行中</span> · '
-    sub += esc(wsTitle(wsOf(c.id)))
-    if (c.model) sub += ' · ' + esc(modelName(c))
+    if (isAgent(c.id)) sub += esc(ag ? ag.name + (ag.project ? ' · ' + ag.project : '') : '')
+    else sub += esc(wsTitle(wsOf(c.id)))
+    if (c.model && !isAgent(c.id)) sub += ' · ' + esc(modelName(c))
     el.cSub.innerHTML = sub
   }
   function userHtml(c, it) {
@@ -862,6 +918,7 @@
     })
     flush()
     c.pending.forEach(function (p) { h += userHtml(c, p) })
+    if (!h && isAgent(c.id)) { var ag = agentOf(c.id); h = '<div class="hint"><b>' + esc(ag ? ag.project || ag.name : '外部会话') + '</b>电脑上的新动态会出现在这里</div>' }
     if (!h) h = '<div class="hint"><b>' + esc(wsTitle(wsOf(c.id))) + '</b>发一条消息开始</div>'
     el.msgs.innerHTML = h
     drawTail(c)
@@ -890,7 +947,10 @@
     return '<div class="card ask"><div class="ch"><i class="dotw"></i>需要你确认<span class="x">' + esc(toolLabel(a.tool)) + '</span></div>' +
       '<div class="ct">' + esc(title) + '</div>' + (a.why ? '<div class="cw">' + esc(a.why) + '</div>' : '') +
       (detail && detail !== title ? '<pre>' + esc(detail) + '</pre>' : '') +
-      '<div class="btns"><button class="btn danger" data-deny="' + esc(a.id) + '">拒绝</button><button class="btn pri" data-allow="' + esc(a.id) + '">' + ic('check', 's') + '允许</button></div></div>'
+      '<div class="btns"><button class="btn danger" data-deny="' + esc(a.id) + '">拒绝</button>' +
+      (a.remember ? '<button class="btn" data-remember="' + esc(a.id) + '">允许并记住</button>' : '') +
+      '<button class="btn pri" data-allow="' + esc(a.id) + '">' + ic('check', 's') + '允许</button></div>' +
+      (a.remember ? '<div class="cw">"允许并记住"：这个会话里同类操作不再询问</div>' : '') + '</div>'
   }
   function qHtml(q) {
     var sel = q._sel || (q._sel = {}), custom = q._custom || (q._custom = {})
@@ -945,6 +1005,12 @@
     el.input.style.height = Math.min(150, el.input.scrollHeight) + 'px'
   }
   function syncSend() {
+    if (S.cur && isAgent(S.cur)) {
+      el.send.className = 'send'
+      el.send.innerHTML = ic('send')
+      el.send.disabled = true
+      return
+    }
     var has = el.input.value.trim() || S.att.length
     if (S.cur && isRunning(S.cur) && !has) {
       el.send.className = 'send stop'
@@ -1085,9 +1151,24 @@
       rpc('session.selectModel', Object.assign({ sessionId: c.id }, sel)).then(function (r) { c.model = r.selected; buzz(); paint(); renderHead() }, function (err) { toast(err.message, 'err') })
     }
   }
+  function agentMoreSheet(c) {
+    var ag = agentOf(c.id)
+    openSheet('<div class="sh-h">' + esc(el.cTitle.textContent) + '<small>' + esc(ag ? ag.cwd || '' : '') + '</small></div><div class="sh-b">' +
+      '<button class="opt-row" data-a="files"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>项目文件</b><small>' + esc(ag ? ag.project : '') + '</small></span>' + ic('chev', 's') + '</button>' +
+      '<button class="opt-row" data-a="mode"><span class="ico">' + ic('alert', 's') + '</span><span class="mid"><b>确认请求发到哪里</b><small>' + esc(MODE_NAME[S.agents.mode] || '') + '</small></span>' + ic('chev', 's') + '</button></div>')
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-a]')
+      if (!b) return
+      closeOverlay().then(function () {
+        if (b.dataset.a === 'files') fvOpen({ kind: 'path', s: c.id, path: '', title: (ag && ag.project) || '项目' })
+        else modeSheet()
+      })
+    }
+  }
   function moreSheet() {
     var c = S.chats.get(S.cur)
     if (!c) return
+    if (isAgent(c.id)) { agentMoreSheet(c); return }
     openSheet('<div class="sh-h">' + esc(el.cTitle.textContent) + '</div><div class="sh-b">' +
       '<button class="opt-row" data-a="model"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>切换模型</b><small>' + esc(modelName(c) || '当前模型') + '</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="files"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>工作区文件</b><small>' + esc(wsTitle(wsOf(c.id))) + '</small></span>' + ic('chev', 's') + '</button>' +
@@ -1174,7 +1255,11 @@
   document.querySelectorAll('[data-ic]').forEach(function (n) { n.innerHTML = ic(n.dataset.ic) })
   el.status.lastChild.textContent = '连接中'
 
-  el.rows.addEventListener('click', function (e) { var b = e.target.closest('[data-open]'); if (b) openChat(b.dataset.open) })
+  el.rows.addEventListener('click', function (e) {
+    if (e.target.closest('[data-mode]')) { modeSheet(); return }
+    var b = e.target.closest('[data-open]')
+    if (b) openChat(b.dataset.open)
+  })
   el.chips.addEventListener('click', function (e) {
     var b = e.target.closest('[data-f]')
     if (!b) return
@@ -1355,13 +1440,15 @@
   el.dock.addEventListener('click', function (e) {
     var c = S.chats.get(S.cur), b
     if (!c) return
-    if ((b = e.target.closest('[data-allow],[data-deny]'))) {
-      var id = b.dataset.allow || b.dataset.deny, a = S.asks.get(id)
+    if ((b = e.target.closest('[data-allow],[data-deny],[data-remember]'))) {
+      var id = b.dataset.allow || b.dataset.deny || b.dataset.remember, a = S.asks.get(id)
       if (!a) return
-      var outcome = b.dataset.allow ? 'allowed-once' : 'rejected'
+      var outcome = b.dataset.deny ? 'rejected' : 'allowed-once'
       b.parentNode.querySelectorAll('button').forEach(function (x) { x.disabled = true })
       buzz(outcome === 'allowed-once' ? 15 : 8)
-      respond(a.rpc, { ok: true, value: { sessionId: a.s, approvalId: a.id, outcome: outcome } }).then(function (r) {
+      var value = { sessionId: a.s, approvalId: a.id, outcome: outcome }
+      if (b.dataset.remember) value.remember = true
+      respond(a.rpc, { ok: true, value: value }).then(function (r) {
         S.asks.delete(id)
         drawDock(); scheduleHome()
         if (!r.accepted && r.reason !== 'not-pending') toast('没有生效：' + r.reason, 'err')
@@ -1447,6 +1534,6 @@
   var cached = store.get('boot', null)
   if (cached && cached.sessions) { try { applyBoot(cached); S.run = new Set() } catch (e) {} }
   renderHome()
-  loadBoot().then(function () { if (deep && S.byId[deep]) openChat(deep) }, function (e) { toast(e.message, 'err') })
+  loadBoot().then(function () { if (deep && (S.byId[deep] || isAgent(deep))) openChat(deep) }, function (e) { toast(e.message, 'err') })
   connect()
 })()

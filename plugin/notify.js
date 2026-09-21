@@ -165,6 +165,25 @@ export class NotifyHub {
     return ev
   }
 
+  /**
+   * A pending approval from outside DSH (Claude Code / Codex, agents.js): the
+   * same notice, and replayed on every phone connect. Kept apart from
+   * `this.asks`, which is rebuilt from DSH's replay on every mux reconnect.
+   */
+  externalAsk(a) {
+    if (!this.extAsks) this.extAsks = new Map()
+    const ev = { t: 'ask', s: a.s, title: a.title, rpc: a.rpc, id: a.id, tool: a.tool, what: a.what, detail: a.detail }
+    this.extAsks.set(a.id, ev)
+    this.emit(ev)
+  }
+
+  externalAskDone(id, outcome) {
+    const a = this.extAsks && this.extAsks.get(id)
+    if (!a) return
+    this.extAsks.delete(id)
+    this.emit({ t: 'askDone', s: a.s, id, outcome })
+  }
+
   /** Also deliver every notice to `fn` (Web Push); returns the unsubscribe. */
   onNotice(fn) {
     if (!this.listeners) this.listeners = new Set()
@@ -277,6 +296,7 @@ export class NotifyHub {
       for (const ev of this.buf) if (ev.n > since && ev.at >= cutoff && ev.t !== 'ask' && ev.t !== 'q') client.send(ev)
     }
     for (const a of this.asks.values()) client.send({ ...a, replay: true })
+    for (const a of (this.extAsks || new Map()).values()) client.send({ ...a, replay: true })
     for (const q of this.qs.values()) client.send({ ...q, replay: true })
     this.clients.add(client)
     const ping = setInterval(() => client.send({ t: 'p' }), Math.min(300, Math.max(20, hb)) * 1000)

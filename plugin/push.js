@@ -99,6 +99,8 @@ export function noticePayload(ev) {
       return { payload: { ...base, title: ev.title || 'DSH', body: '已完成' + (ev.ms ? ' · ' + dur(ev.ms) : '') + (ev.preview ? '\n' + clip(ev.preview, 140) : ''), tag: 'd:' + ev.s }, urgency: 'normal', ttl: 6 * 3600 }
     case 'err':
       return { payload: { ...base, title: ev.title || 'DSH', body: '运行出错：' + clip(ev.msg, 160), tag: 'd:' + ev.s }, urgency: 'high', ttl: 6 * 3600 }
+    case 'info':
+      return { payload: { ...base, title: ev.title || 'DSH', body: clip(ev.text, 180), tag: 'i:' + ev.s }, urgency: 'normal', ttl: 3600 }
     default:
       return null
   }

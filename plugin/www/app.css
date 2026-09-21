@@ -126,6 +126,11 @@ input, textarea { font: inherit; color: inherit; }
 .tag.ask { color: var(--warn); background: var(--warn-soft); }
 .alert { display: flex; align-items: center; gap: 10px; margin: 0 12px 10px; padding: 12px 14px; border-radius: 14px; background: var(--warn-soft); color: var(--warn); font-size: 14px; font-weight: 600; width: calc(100% - 24px); text-align: left; }
 .alert span { flex: 1; }
+.sec-row { display: flex; align-items: center; justify-content: space-between; }
+.secbtn { display: inline-flex; align-items: center; gap: 2px; font-size: 12.5px; font-weight: 600; color: var(--accent); padding: 2px 0 2px 8px; }
+.secbtn:active { opacity: 0.6; }
+.grp.agents .row { align-items: center; }
+#input:disabled { opacity: 0.6; }
 .empty { padding: 72px 32px; text-align: center; color: var(--text3); font-size: 14px; }
 .empty b { display: block; font-size: 16px; color: var(--text2); font-weight: 600; margin-bottom: 6px; }
 .fab { position: absolute; right: 20px; bottom: calc(24px + var(--sab)); width: 58px; height: 58px; border-radius: 29px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; box-shadow: 0 10px 28px rgba(77, 107, 254, 0.38); transition: transform 0.15s; }

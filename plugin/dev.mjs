@@ -21,7 +21,7 @@ const TRUSTED_HOSTS = (process.env.TRUSTED_HOSTS || '').split(',').map((h) => h.
 // Its own push state: a dev server next to the live plugin must not push every notice twice.
 const PUSH_DIR = process.env.PUSH_DIR || path.join(os.homedir(), '.dsh-pager-dev')
 
-const mobile = createMobile({ apiPort: () => DSH_PORT, log: (m) => console.log(`[dsh-pager] ${m}`), trustedHosts: TRUSTED_HOSTS, pushDir: PUSH_DIR })
+const mobile = createMobile({ apiPort: () => DSH_PORT, servePort: () => PORT, log: (m) => console.log(`[dsh-pager] ${m}`), trustedHosts: TRUSTED_HOSTS, pushDir: PUSH_DIR })
 
 http
   .createServer((req, res) => {

@@ -32,14 +32,15 @@ export const SOURCES = { claude: 'Claude Code', codex: 'Codex' }
  * replaced by node + the package's JS entry next to it.
  */
 export function resolveBins({ env = process.env, platform = process.platform, exists = fs.existsSync } = {}) {
-  const dirs = String(env.PATH || env.Path || '').split(path.delimiter).filter(Boolean)
+  const P = platform === 'win32' ? path.win32 : path.posix
+  const dirs = String(env.PATH || env.Path || '').split(P.delimiter).filter(Boolean)
   const pick = (name, pkgEntry) => {
     for (const dir of dirs) {
       if (platform === 'win32') {
-        if (exists(path.join(dir, name + '.exe'))) return [path.join(dir, name + '.exe')]
-        const js = path.join(dir, 'node_modules', ...pkgEntry)
-        if (exists(path.join(dir, name + '.cmd')) && exists(js)) return [process.execPath, js]
-      } else if (exists(path.join(dir, name))) return [path.join(dir, name)]
+        if (exists(P.join(dir, name + '.exe'))) return [P.join(dir, name + '.exe')]
+        const js = P.join(dir, 'node_modules', ...pkgEntry)
+        if (exists(P.join(dir, name + '.cmd')) && exists(js)) return [process.execPath, js]
+      } else if (exists(P.join(dir, name))) return [P.join(dir, name)]
     }
     return null
   }

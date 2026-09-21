@@ -19,6 +19,11 @@ function rig({ idleMs = 1000, locked = false, mode, holdMs, dir } = {}) {
   if (holdMs) hub.settings.holdMs = holdMs
   return { hub, calls, p }
 }
+/** The hub unrefs its hold timers (DSH's web server keeps the process up); keep the test up while one runs. */
+async function alive(p) {
+  const keep = setInterval(() => {}, 1000)
+  try { return await p } finally { clearInterval(keep) }
+}
 const perm = (extra = {}) => ({ session_id: 's1', cwd: 'E:\\work\\shop', hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'rm -rf dist', description: 'Clean build output' }, ...extra })
 const ALLOW = { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow' } } }
 
@@ -58,14 +63,14 @@ test('deny, and "remember" turns suggestions into session rules (Claude Code)', 
 
 test('held requests go back to the PC: timeout, user returns, tool gives up', async () => {
   const t = rig({ locked: true, holdMs: 30 })
-  assert.deepEqual(await t.hub.handle('claude', perm()), {})
+  assert.deepEqual(await alive(t.hub.handle('claude', perm())), {})
   assert.equal(t.calls.askDone[0][1], 'timeout')
 
   const b = rig({ idleMs: 10 * 60 * 1000 })
   const back = b.hub.handle('claude', perm())
   await new Promise((r) => setImmediate(r))
   b.p.idleMs = 800 // someone touched the mouse
-  assert.deepEqual(await back, {})
+  assert.deepEqual(await alive(back), {})
   assert.equal(b.calls.askDone[0][1], 'local')
 
   const g = rig({ locked: true })
@@ -163,11 +168,13 @@ test('prompt from the phone: resume without a shell, busy guard, errors come bac
 
 test('resolveBins: native exe first, npm shim becomes node + entry, nothing found is null', () => {
   const R = String.raw
-  const entry = path.join(R`C:\npm`, 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
-  const files = new Set([path.join(R`C:\a`, 'claude.exe'), path.join(R`C:\npm`, 'codex.cmd'), entry])
+  const entry = R`C:\npm\node_modules\@openai\codex\bin\codex.js`
+  const files = new Set([R`C:\a\claude.exe`, R`C:\npm\codex.cmd`, entry])
   const exists = (p) => files.has(p)
-  const b = resolveBins({ env: { PATH: [R`C:\a`, R`C:\npm`].join(path.delimiter) }, platform: 'win32', exists })
-  assert.deepEqual(b.claude, [path.join(R`C:\a`, 'claude.exe')])
+  const b = resolveBins({ env: { PATH: R`C:\a;C:\npm` }, platform: 'win32', exists })
+  assert.deepEqual(b.claude, [R`C:\a\claude.exe`])
   assert.deepEqual(b.codex, [process.execPath, entry])
   assert.deepEqual(resolveBins({ env: { PATH: R`C:\none` }, platform: 'win32', exists }), { claude: null, codex: null })
+  const unix = new Set(['/usr/local/bin/claude'])
+  assert.deepEqual(resolveBins({ env: { PATH: '/usr/bin:/usr/local/bin' }, platform: 'linux', exists: (p) => unix.has(p) }), { claude: ['/usr/local/bin/claude'], codex: null })
 })

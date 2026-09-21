@@ -55,6 +55,7 @@ App 本身只是一个 WebView 外壳（界面由电脑上的插件提供），�
 
 - 前台服务 `NotifyService` 常驻，连接插件的 `/m/api/notify`：这条流 120 秒一次心跳，只有有事时才发帧，非常省电。它会在通知栏留一条最低优先级的"后台连接"通知，这是 Android 对前台服务的要求。
 - 开机和 App 升级后自动恢复（`BootReceiver`）。
+  但部分系统不会把这类广播发给 App（实测华为 HarmonyOS 4.2：更新后服务没有自己起来），**更新后打开一次 App** 即可恢复。
 - Wi-Fi 和移动网络切换时立即重连。断网或电脑关机时按 3 秒到 60 秒指数退避重试。
 - 每条提醒带递增序号，断线期间漏掉的会补发（6 小时内）。DSH 重启会换一个新的 epoch，不会重复提醒。待处理的审批和提问，每次连上都会重发。
 - 如果你的网关登录过期，会收到一条"需要重新登录"的通知，之后每 10 分钟重试一次。
@@ -115,9 +116,14 @@ DSH_DEFAULT_SERVER=https://pc.example.com:8443
 
 | 命令 | 产物 |
 |---|---|
-| `bash android/build.sh public` | 不预置地址，首次打开时询问（Release 用的就是这个） |
-| `bash android/build.sh` | 预置 `DSH_DEFAULT_SERVER`，自用最方便 |
+| `bash android/build.sh public` | 不预置地址，首次打开时询问；**关闭** WebView 远程调试（Release 用的就是这个） |
+| `bash android/build.sh` | 预置 `DSH_DEFAULT_SERVER`，自用最方便；**开启** WebView 远程调试 |
 | `bash android/build.sh install` | 同上，并执行 `adb install -r` |
+
+**关于 WebView 远程调试**：
+- 私有构建开着它，开发时可以 `adb forward tcp:9333 localabstract:webview_devtools_remote_<pid>`，再用 Chrome DevTools 协议直接检查和操作页面，锁屏状态下也行。
+- 但拿到手机 USB 调试授权的人也能这样读取网关 Cookie、操作 DSH，所以公开版关闭了它。
+- 自用的私有构建，请只在你自己信任的电脑上授权 USB 调试。
 
 构建流程：aapt2 → javac → d8 → zipalign → apksigner，大约 30 秒，产物约 33 KB。
 

@@ -144,7 +144,7 @@ DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。
 
 ### 3. 在手机上装 App
 
-从 [Releases](https://github.com/wg5759/dsh-pager/releases) 下载 `dsh-pager-v1.2.0.apk`，下载后请核对 `SHA256SUMS`，也可以按 [docs/android.md](docs/android.md) 自己编译。
+从 [Releases](https://github.com/wg5759/dsh-pager/releases/latest) 下载最新的 `dsh-pager-v<版本>.apk`，下载后请核对 `SHA256SUMS`，也可以按 [docs/android.md](docs/android.md) 自己编译。
 
 首次打开会让你填服务器地址，例如 `https://pc.example.com:8443` 或 `100.64.0.5:8080`，填完即可使用。
 
@@ -159,7 +159,7 @@ DSH 本身**没有登录功能**，所以千万别把它直接暴露到公网。
 - **能在手机上发指令，就等于能让电脑执行命令**（受 DSH 自身审批策略约束）。所以远程通道必须有你信得过的认证：VPN，或带登录的网关。
 - dsh-pager 不开新端口，也不改变 DSH 的绑定地址，`/m/api/*` 沿用和 DSH 相同的 Host / Origin / 跨站检查。`trustedHosts` 里写错的条目会让插件在加载时直接报错，而不是悄悄放行。
 - App 本地只存服务器地址、网关 Cookie（如果有）和提醒序号；日志只记连接状态和帧类型，不记内容和凭据（`adb logcat -s DSHNotify`）。
-- 没有统计、没有第三方 SDK、不依赖 Google 服务。
+- 没有统计、没有第三方 SDK、不依赖 Google 服务；公开版 APK 关闭了 WebView 远程调试（1.2.1 起）。
 
 ## 开发
 

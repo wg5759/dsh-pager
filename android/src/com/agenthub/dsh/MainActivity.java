@@ -68,8 +68,9 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle saved) {
         super.onCreate(saved);
         prefs = getSharedPreferences("dsh", MODE_PRIVATE);
-        // Lets `adb forward ... webview_devtools_remote` inspect the page; reachable only over authorised USB debugging.
-        WebView.setWebContentsDebuggingEnabled(true);
+        // Private builds let `adb forward ... webview_devtools_remote` inspect the page (authorised USB
+        // debugging only). Public builds keep it off: DevTools can read the gateway cookie and drive DSH.
+        WebView.setWebContentsDebuggingEnabled(BuildInfo.WEBVIEW_DEBUG);
 
         web = new WebView(this);
         web.setBackgroundColor(getColor(R.color.bg));

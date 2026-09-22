@@ -134,7 +134,7 @@ input, textarea { font: inherit; color: inherit; }
 #input:disabled { opacity: 0.6; }
 .empty { padding: 72px 32px; text-align: center; color: var(--text3); font-size: 14px; }
 .empty b { display: block; font-size: 16px; color: var(--text2); font-weight: 600; margin-bottom: 6px; }
-.fab { position: absolute; right: 20px; bottom: calc(24px + var(--sab)); width: 58px; height: 58px; border-radius: 29px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; box-shadow: 0 10px 28px rgba(77, 107, 254, 0.38); transition: transform 0.15s; }
+.fab { position: absolute; z-index: 2; right: 20px; bottom: calc(24px + var(--sab)); width: 58px; height: 58px; border-radius: 29px; background: var(--accent); color: var(--accent-ink); display: grid; place-items: center; box-shadow: 0 10px 28px rgba(77, 107, 254, 0.38); transition: transform 0.15s; }
 .fab .i { width: 26px; height: 26px; stroke-width: 2.2; }
 .fab:active { transform: scale(0.94); }
 .sk { height: 64px; margin: 0 12px 8px; border-radius: 16px; background: linear-gradient(90deg, var(--surface) 25%, var(--sunken) 50%, var(--surface) 75%); background-size: 200% 100%; animation: shimmer 1.3s infinite; }

@@ -152,13 +152,15 @@ function readJson(req, limit) {
 }
 
 /**
- * @param {{ apiPort: () => number, servePort?: () => number, log?: (msg: string) => void, trustedHosts?: string[], pushDir?: string, appApk?: string }} opts
+ * @param {{ apiPort: () => number, servePort?: () => number, log?: (msg: string) => void, trustedHosts?: string[], pushDir?: string, appApk?: string, transcripts?: { claudeDir?: string, codexDir?: string }, spawnAgent?: typeof spawn }} opts
  *   servePort: where /m itself is served, when that is not DSH's port (dev.mjs); hooks post there.
  *   appApk: the APK offered for in-app updates (build.sh writes <apk>.json beside it); default
  *   android/out/DSH.apk, then the newest android/out/dsh-pager-v*.apk of this repo.
+ *   transcripts / spawnAgent: where Claude Code / Codex session files live and how a phone turn
+ *   starts one of them; only the demo (demo/fake-dsh.mjs) replaces the real ones.
  * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
  */
-export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk }) {
+export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, transcripts = {}, spawnAgent = spawn }) {
   // Fail the load loudly, as DSH does, rather than 403 every phone request later.
   const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
   if (badHost !== undefined) throw new Error(`dsh-pager: trustedHosts entry ${JSON.stringify(badHost)} is not a bare host[:port] authority`)
@@ -206,7 +208,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   const baseName = (p) => String(p || '').split(/[\\/]/).filter(Boolean).pop() || ''
   function diskSessions() {
     if (diskList && Date.now() - diskList.at < 15000) return diskList.v
-    const v = recentFiles({ days: 7, max: 30 }).map((f) => {
+    const v = recentFiles({ days: 7, max: 30, ...transcripts }).map((f) => {
       let m = diskMeta.get(f.file)
       if (!m || m.size !== f.size || m.mtime !== f.at) {
         m = { size: f.size, mtime: f.at, title: '', cwd: '' }
@@ -229,9 +231,11 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     return { key, src, sid, cwd: (live && live.cwd) || (disk && disk.cwd) || '', file: (live && live.transcript) || (disk && disk.file) || '', title: (live && live.title) || (disk && disk.title) || '' }
   }
   function agentSessions() {
-    const live = agents.list()
+    const disk = new Map(diskSessions().map((x) => [x.id, x]))
+    // A session the hooks only saw ask for permission (e.g. after a restart) has no title yet; its file does.
+    const live = agents.list().map((x) => { const d = disk.get(x.id); return d ? { ...x, title: x.title || d.title, cwd: x.cwd || d.cwd, project: x.project || d.project } : x })
     const seen = new Set(live.map((x) => x.id))
-    return live.concat(diskSessions().filter((x) => !seen.has(x.id)).map(({ file, sid, ...x }) => x)).sort((a, b) => b.at - a.at).slice(0, 30)
+    return live.concat([...disk.values()].filter((x) => !seen.has(x.id)).map(({ file, sid, ...x }) => x)).sort((a, b) => b.at - a.at).slice(0, 30)
   }
   // Session files a phone is looking at: a change means "refetch" (debounced), for 10 minutes after the last look.
   const watched = new Map()
@@ -529,7 +533,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
         const b = await readJson(req, 64 * 1024)
         const info = agentInfo(b.s || '')
         if (!info) throw Object.assign(new Error('找不到这个会话'), { status: 404, code: 'not-found' })
-        return json(req, res, 200, { ok: true, value: agents.prompt(info, b.text, { spawnImpl: spawn, bins }) })
+        return json(req, res, 200, { ok: true, value: agents.prompt(info, b.text, { spawnImpl: spawnAgent, bins }) })
       }
       if ((route === 'app/latest' || route === 'app/apk') && !isPost) {
         const b = appBuild()

@@ -7,6 +7,23 @@
 
 `MIT` · `Android 10+` · `iOS 16.4+（网页版）` · `DeepSeek Harness 0.1.x` · `Node.js 22+` · `dsh-plugin`
 
+<table>
+<tr>
+<td><img src="docs/img/home.png" width="240" alt="首页：DSH 会话、Claude Code / Codex、待确认的操作"></td>
+<td><img src="docs/img/chat.png" width="240" alt="对话：回复、每个工具一行、耗时"></td>
+<td><img src="docs/img/approval.png" width="240" alt="在手机上允许或拒绝"></td>
+</tr>
+<tr><td align="center">首页</td><td align="center">对话</td><td align="center">在手机上审批</td></tr>
+<tr>
+<td><img src="docs/img/diff.png" width="240" alt="结果查看器：完整的改动对比"></td>
+<td><img src="docs/img/agents.png" width="240" alt="Claude Code 的确认请求"></td>
+<td><img src="docs/img/home-dark.png" width="240" alt="深色模式"></td>
+</tr>
+<tr><td align="center">看完整改动</td><td align="center">Claude Code 也能管</td><td align="center">深色模式</td></tr>
+</table>
+
+<sub>截图来自演示模式（`node plugin/dev.mjs --demo`），数据全部是虚构的。</sub>
+
 ---
 
 ## 为什么做它
@@ -197,10 +214,12 @@ node tools/install-hooks.mjs codex      # Codex（装好后在 Codex 里输入 /
 ## 开发
 
 ```bash
-cd plugin && npm test                 # 插件单测（60 项，含 RFC 8291 官方测试向量）
+cd plugin && npm test                 # 插件单测（62 项，含 RFC 8291 官方测试向量）
 node --test tools/*.test.mjs          # 转发器、钩子安装器单测
 node tools/make-icons.mjs             # 重新生成网页 App 图标
 node plugin/dev.mjs                   # 独立开发服务器 http://127.0.0.1:3090/m/，直连本机 DSH，改服务端代码不用重启 DSH
+node plugin/dev.mjs --demo            # 演示模式：假的 DSH 后端 + 虚构的项目和会话，不需要 DSH，也不会显示真实数据
+node tools/screenshots.mjs            # 用演示模式和无头 Chrome / Edge 重新生成 docs/img/ 下的截图
 bash android/build.sh public          # 编译 App（无 Gradle，需 Android SDK build-tools 34 + JDK 17）
 ```
 
@@ -210,9 +229,11 @@ bash android/build.sh public          # 编译 App（无 Gradle，需 Android SD
 plugin/     DSH 插件：index.js 挂载 · server.js 接口与实时桥 · fold.js 事件折叠 · notify.js 提醒中枢
             files.js 结果查看器（只读、限工作区）· push.js 网页推送 · www/ 手机界面、Service Worker、Web App 清单
             agents.js Claude Code / Codex 钩子中枢 · presence.js 是否在电脑前 · transcripts.js 读它们的会话文件
+            demo/ 演示模式（fake-dsh.mjs 按 DSH 线协议提供虚构数据）
 android/    App 外壳：MainActivity（WebView、首次配置、App 内更新、分享）· NotifyService（后台提醒）
             UpdateReceiver · BootReceiver · build.sh
-tools/      forward.mjs 转发到私有地址 · pager-hook.mjs 钩子命令 · install-hooks.mjs 安装钩子 · make-icons.mjs 生成图标
+tools/      forward.mjs 转发到私有地址 · pager-hook.mjs 钩子命令 · install-hooks.mjs 安装钩子
+            make-icons.mjs 生成图标 · screenshots.mjs 生成截图
 docs/       远程访问 · Android · iPhone · Claude Code / Codex · DSH 协议笔记
 ```
 
@@ -246,6 +267,8 @@ Together they let you follow sessions, send prompts, and approve or reject tool 
   - About 2,500 lines of server JS and a vanilla JS UI that hot-reloads on the phone.
   - A 1,200-line Java shell built without Gradle, with in-app updates served from your own PC.
 - **Claude Code and Codex too.** Hooks route their permission prompts to the phone while you are away (screen locked or 3 min idle) and hand them back the moment you touch the PC; you can also read their sessions and continue them from the phone. See [docs/agents.md](docs/agents.md).
+
+Try the UI without DSH: `node plugin/dev.mjs --demo` serves made-up projects and sessions from a fake DSH at http://127.0.0.1:3090/m/ (the screenshots above come from it).
 
 Quick start:
 1. Link `plugin/` into `~/.dsh/profiles/web/node_modules/dsh-pager`.

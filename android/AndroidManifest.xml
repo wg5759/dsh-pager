@@ -45,6 +45,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Unlock gate for Allow / answer / reply from notifications (see ConfirmActivity). -->
+        <activity
+            android:name=".ConfirmActivity"
+            android:exported="false"
+            android:theme="@style/Invisible"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:configChanges="orientation|screenSize|keyboardHidden" />
+
         <receiver
             android:name=".UpdateReceiver"
             android:exported="false" />

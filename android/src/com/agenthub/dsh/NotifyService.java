@@ -354,11 +354,11 @@ public class NotifyService extends Service {
      * A notification button. `unlock`: Android 12+ asks to unlock the phone before
      * running it. `hint`: a text-input button (RemoteInput) with this placeholder.
      */
-    private Notification.Action action(String title, Object target, boolean unlock, String hint) {
-        PendingIntent pi = target instanceof PendingIntent ? (PendingIntent) target : pending((Intent) target, hint != null);
+    private Notification.Action action(String title, Intent target, boolean unlock, String hint) {
+        boolean typed = hint != null;
+        PendingIntent pi = unlock ? confirm(target, typed) : service(target, typed);
         Notification.Action.Builder b = new Notification.Action.Builder(Icon.createWithResource(this, R.drawable.ic_stat), title, pi);
-        if (hint != null) b.addRemoteInput(new RemoteInput.Builder(KEY_TEXT).setLabel(hint).build());
-        if (unlock && Build.VERSION.SDK_INT >= 31) b.setAuthenticationRequired(true);
+        if (typed) b.addRemoteInput(new RemoteInput.Builder(KEY_TEXT).setLabel(hint).build());
         return b.build();
     }
 
@@ -374,11 +374,32 @@ public class NotifyService extends Service {
                 .putExtra("slot", slot);
     }
 
-    private PendingIntent pending(Intent i, boolean typed) {
-        int rc = i.getIntExtra("nid", 0) * 8 + i.getIntExtra("slot", 0);
+    /** Distinct request code per notification button, so PendingIntents do not overwrite each other. */
+    private static int reqCode(Intent i) {
+        return i.getIntExtra("nid", 0) * 8 + i.getIntExtra("slot", 0) + (ACTION_ALLOW.equals(i.getAction()) ? 1 : 0);
+    }
+
+    /** Fire the action straight away (no unlock needed, e.g. Deny). */
+    private PendingIntent service(Intent i, boolean typed) {
         // A RemoteInput button must be mutable: the system adds the typed text to it.
         int mut = typed ? (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0) : PendingIntent.FLAG_IMMUTABLE;
-        return PendingIntent.getForegroundService(this, rc, i, mut | PendingIntent.FLAG_UPDATE_CURRENT);
+        return PendingIntent.getForegroundService(this, reqCode(i), i, mut | PendingIntent.FLAG_UPDATE_CURRENT);
+    }
+
+    /**
+     * Require the phone to be unlocked first, then run the action. Goes through
+     * ConfirmActivity (KeyguardManager.requestDismissKeyguard) rather than
+     * Notification.Action.setAuthenticationRequired, whose unlock-then-fire flow
+     * is not delivered on some OEM builds (HarmonyOS).
+     */
+    private PendingIntent confirm(Intent target, boolean typed) {
+        Intent i = new Intent(this, ConfirmActivity.class)
+                .setAction(target.getAction()) // a distinct intent identity per button
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION)
+                .putExtra("fwd", target.getAction());
+        if (target.getExtras() != null) i.putExtras(target.getExtras());
+        int mut = typed ? (Build.VERSION.SDK_INT >= 31 ? PendingIntent.FLAG_MUTABLE : 0) : PendingIntent.FLAG_IMMUTABLE;
+        return PendingIntent.getActivity(this, reqCode(target), i, mut | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
     private static String typed(Intent in) {
@@ -405,15 +426,14 @@ public class NotifyService extends Service {
         return PendingIntent.getActivity(this, rc, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
-    private PendingIntent act(String action, JSONObject f, int nid) {
-        Intent i = new Intent(this, NotifyService.class)
+    /** The service intent behind an Allow / Deny button; wrapped into a PendingIntent by action(). */
+    private Intent act(String action, JSONObject f, int nid) {
+        return new Intent(this, NotifyService.class)
                 .setAction(action)
                 .putExtra("rpc", f.optString("rpc"))
                 .putExtra("s", f.optString("s"))
                 .putExtra("id", f.optString("id"))
                 .putExtra("nid", nid);
-        int rc = nid * 2 + (ACTION_ALLOW.equals(action) ? 1 : 0);
-        return PendingIntent.getForegroundService(this, rc, i, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
     }
 
     /** Answer an approval straight from the notification. */

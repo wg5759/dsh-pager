@@ -46,6 +46,28 @@ export function resolveBins({ env = process.env, platform = process.platform, ex
   }
   return { claude: pick('claude', ['@anthropic-ai', 'claude-code', 'cli.js']), codex: pick('codex', ['@openai', 'codex', 'bin', 'codex.js']) }
 }
+// What a Claude Code host (desktop app, IDE, an agent's shell) sets for its child processes to
+// tie them to itself: nesting flag, session ids, IPC channel, delegated auth. DSH inherits these
+// when an agent started it; a phone-started turn is nobody's child, so they are dropped.
+const HOST_VARS = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_AGENT_SDK_VERSION|CLAUDE_CODE_(ENTRYPOINT|SESSION_ID|HOST_SESSION_ID|CHILD_SESSION|SESSION_ATTENDED|MESSAGING_SOCKET|MESSAGING_TOKEN|SDK_HAS_HOST_AUTH_REFRESH|OAUTH_SCOPES|DESKTOP_APP_VERSION|EXECPATH|SSE_PORT))$/
+
+/** `env` without the variables that tie a process to an enclosing Claude Code session. */
+export function hostFreeEnv(env = process.env) {
+  const out = {}
+  for (const [k, v] of Object.entries(env)) if (!HOST_VARS.test(k)) out[k] = v
+  return out
+}
+
+/** The next step for failures the phone cannot fix itself, or ''. */
+export function errorHint(src, msg) {
+  msg = String(msg || '')
+  if (/\bENOENT\b|is not recognized|command not found/i.test(msg)) return `电脑上找不到 ${SOURCES[src] || src} 命令行：确认已安装，并且在启动 DSH 时的 PATH 里。`
+  if (src === 'claude' && /\b401\b|OAuth|authenticat|\/login/i.test(msg)) return '电脑上的 Claude Code 登录已失效：在电脑终端运行 claude，输入 /login 重新登录。'
+  if (src === 'codex' && /newer version of Codex|upgrade (to )?(the latest )?codex/i.test(msg)) return '电脑上的 Codex 版本太旧：运行 npm i -g @openai/codex 升级。'
+  if (src === 'codex' && /\b401\b|unauthori[sz]ed|not logged in|codex login/i.test(msg)) return '电脑上的 Codex 未登录或登录已失效：在电脑终端运行 codex login。'
+  return ''
+}
+
 export const MODES = ['auto', 'phone', 'pc']
 const DEFAULTS = { mode: 'auto', awayMs: 3 * 60 * 1000, holdMs: 20 * 60 * 1000 }
 const MAX_TIMELINE = 200
@@ -276,7 +298,7 @@ export class AgentHub extends EventEmitter {
    * @param {{ key: string, src: string, sid: string, cwd: string }} target
    * @param {(cmd: string, args: string[], opts: object) => import('node:child_process').ChildProcess} spawnImpl
    */
-  prompt(target, text, { spawnImpl, bins = {} }) {
+  prompt(target, text, { spawnImpl, bins = {}, env = process.env }) {
     text = String(text || '').trim()
     if (!text) throw Object.assign(new Error('消息是空的'), { status: 400, code: 'empty' })
     if (!target.cwd) throw Object.assign(new Error('不知道这个会话的项目目录'), { status: 400, code: 'no-cwd' })
@@ -287,7 +309,7 @@ export class AgentHub extends EventEmitter {
       : ['exec', 'resume', target.sid, text]
     // bins[src] = [command, ...leading args]; never a shell: the text must not be parsed by cmd.exe.
     const [cmd, ...pre] = bins[target.src] || [target.src === 'claude' ? 'claude' : 'codex']
-    const child = spawnImpl(cmd, [...pre, ...args], { cwd: target.cwd, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawnImpl(cmd, [...pre, ...args], { cwd: target.cwd, env: hostFreeEnv(env), windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
     s.running = true
     s.phoneTurn = true
     s.turnStart = this.now()
@@ -302,6 +324,8 @@ export class AgentHub extends EventEmitter {
       let msg = ''
       if (target.src === 'claude') { try { const j = JSON.parse(out.slice(out.indexOf('{'))); if (j.is_error) msg = j.result || 'error' } catch {} }
       if (code !== 0 && !msg) msg = out.trim().split('\n').slice(-3).join(' ') || `exit ${code}`
+      const hint = msg && errorHint(target.src, msg)
+      if (hint) msg = `${hint}\n原话：${msg}`
       if (msg) {
         this.notify.emit({ t: 'err', s: s.key, title: this.label(s), msg: clip(msg, 300) })
         this.emit('fail', { s: s.key, msg: clip(msg, 300) })

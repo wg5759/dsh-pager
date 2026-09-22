@@ -197,7 +197,7 @@ node tools/install-hooks.mjs codex      # Codex（装好后在 Codex 里输入 /
 ## 开发
 
 ```bash
-cd plugin && npm test                 # 插件单测（59 项，含 RFC 8291 官方测试向量）
+cd plugin && npm test                 # 插件单测（60 项，含 RFC 8291 官方测试向量）
 node --test tools/*.test.mjs          # 转发器、钩子安装器单测
 node tools/make-icons.mjs             # 重新生成网页 App 图标
 node plugin/dev.mjs                   # 独立开发服务器 http://127.0.0.1:3090/m/，直连本机 DSH，改服务端代码不用重启 DSH

@@ -256,7 +256,8 @@
     el.toast.textContent = msg
     el.toast.className = 'toast on' + (kind ? ' ' + kind : '')
     clearTimeout(toastT)
-    toastT = setTimeout(function () { el.toast.className = 'toast' }, 2600)
+    // Errors can carry a next step to read: keep them up longer, by length.
+    toastT = setTimeout(function () { el.toast.className = 'toast' }, kind === 'err' ? Math.min(9000, 2600 + String(msg).length * 45) : 2600)
   }
   function copy(text) {
     function fallback() {

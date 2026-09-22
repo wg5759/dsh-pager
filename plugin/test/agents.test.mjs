@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { EventEmitter } from 'node:events'
-import { AgentHub, describeTool, resolveBins } from '../agents.js'
+import { AgentHub, describeTool, resolveBins, errorHint } from '../agents.js'
 
 function rig({ idleMs = 1000, locked = false, mode, holdMs, dir } = {}) {
   const calls = { ask: [], askDone: [], emit: [] }
@@ -143,10 +143,13 @@ test('prompt from the phone: resume without a shell, busy guard, errors come bac
   const spawnImpl = (cmd, args, opts) => { const c = fakeChild(); spawned.push({ cmd, args, opts, c }); return c }
   const bins = { claude: ['C:/n/node.exe', 'C:/g/cli.js'] }
   const target = { key: 'agent:claude:s9', src: 'claude', sid: 's9', cwd: String.raw`D:\p\x` }
-  hub.prompt(target, '  再跑一次 & echo pwned | x > y ', { spawnImpl, bins })
+  // DSH started from inside a Claude Code session carries its host variables; the phone's turn must not.
+  const env = { PATH: 'C:/n', CODEX_HOME: 'D:/codex-home', CLAUDE_CODE_GIT_BASH_PATH: 'C:/git/bash.exe', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'claude-desktop', CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH: '1', CLAUDE_CODE_MESSAGING_TOKEN: 't' }
+  hub.prompt(target, '  再跑一次 & echo pwned | x > y ', { spawnImpl, bins, env })
   const sp = spawned[0]
   assert.deepEqual([sp.cmd, sp.args], ['C:/n/node.exe', ['C:/g/cli.js', '-p', '再跑一次 & echo pwned | x > y', '--resume', 's9', '--output-format', 'json']])
   assert.deepEqual([sp.opts.shell, sp.opts.cwd], [false, String.raw`D:\p\x`])
+  assert.deepEqual(sp.opts.env, { PATH: 'C:/n', CODEX_HOME: 'D:/codex-home', CLAUDE_CODE_GIT_BASH_PATH: 'C:/git/bash.exe' })
   assert.throws(() => hub.prompt(target, 'again', { spawnImpl, bins }), /正在运行/)
   // A phone-started turn sends its dialogs to the phone even while someone sits at the PC.
   const held = hub.handle('claude', { session_id: 's9', hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'ls' } })
@@ -157,13 +160,23 @@ test('prompt from the phone: resume without a shell, busy guard, errors come bac
   sp.c.stdout.emit('data', '{"type":"result","is_error":true,"result":"Failed to authenticate. API Error: 401"}')
   sp.c.emit('exit', 1)
   const err = calls.emit.find((e) => e.t === 'err')
-  assert.deepEqual([err.s, err.msg], ['agent:claude:s9', 'Failed to authenticate. API Error: 401'])
+  assert.equal(err.s, 'agent:claude:s9')
+  assert.match(err.msg, /^电脑上的 Claude Code 登录已失效：在电脑终端运行 claude，输入 \/login 重新登录。\n原话：Failed to authenticate\. API Error: 401$/)
   assert.equal(hub.get('agent:claude:s9').running, false)
   hub.prompt({ ...target, src: 'codex', key: 'agent:codex:s9' }, 'hi', { spawnImpl, bins: {} })
   assert.deepEqual([spawned[1].cmd, spawned[1].args], ['codex', ['exec', 'resume', 's9', 'hi']])
   spawned[1].c.emit('exit', 0)
   assert.equal(calls.emit.filter((e) => e.t === 'err').length, 1)
   assert.throws(() => hub.prompt(target, '   ', { spawnImpl, bins }), /空/)
+})
+
+test('errorHint: what to do on the PC, only for failures the phone cannot fix', () => {
+  assert.match(errorHint('claude', 'Failed to authenticate. API Error: 401 OAuth access token has expired.'), /\/login/)
+  assert.match(errorHint('codex', 'The model requires a newer version of Codex.'), /npm i -g @openai\/codex/)
+  assert.match(errorHint('codex', 'unexpected status 401 Unauthorized'), /codex login/)
+  assert.match(errorHint('claude', 'spawn claude ENOENT'), /找不到 Claude Code 命令行/)
+  assert.equal(errorHint('claude', 'Reached max turns (10)'), '')
+  assert.equal(errorHint('codex', ''), '')
 })
 
 test('resolveBins: native exe first, npm shim becomes node + entry, nothing found is null', () => {

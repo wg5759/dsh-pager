@@ -203,7 +203,8 @@ export async function startDemo({ root, port = 0, log = () => {} }) {
     if (s.running) s.cancel = true
   }
 
-  const listItem = (s) => ({ sessionId: s.id, running: s.running, updatedAt: s.at, origin: 'user', blank: s.events.length === 0, projections: { values: { title: s.title } } })
+  const values = (s) => ({ title: s.title, ...(s.usage || {}) })
+  const listItem = (s) => ({ sessionId: s.id, running: s.running, updatedAt: s.at, origin: 'user', blank: s.events.length === 0, projections: { values: values(s) } })
   const own = (id) => { const s = S.get(id); if (!s) throw Object.assign(new Error('session not found'), { code: 'not-found' }); return s }
 
   const METHODS = {
@@ -219,7 +220,7 @@ export async function startDemo({ root, port = 0, log = () => {} }) {
       let i = all.length
       let n = 0
       while (i > 0 && n < maxMessages) { i--; if (/^(user|assistant)\/message$/.test(all[i].event.type)) n++ }
-      return { events: all.slice(i), hasMore: i > 0, projections: { values: { title: s.title } } }
+      return { events: all.slice(i), hasMore: i > 0, projections: { values: values(s) } }
     },
     'session.create': ({ workspaceId }) => {
       const id = 'session-' + crypto.randomUUID()

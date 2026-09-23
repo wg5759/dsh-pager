@@ -324,3 +324,27 @@ export function foldQueue(items) {
     .filter((i) => i && i.placement !== 'context')
     .map((i) => ({ id: i.id, place: i.placement, text: cut(textOf(i.message && i.message.content), 300) }))
 }
+
+/**
+ * One session's usage from its DSH projections, which are cumulative for the whole session:
+ * tokens (uncached input, output, cache read / write), turns and steps, model and tool time,
+ * mean time to first token, output speed, and how full the context window is.
+ * sessionStats.ttftMs and decodeMs are sums over steps, hence the divisions.
+ * @returns null when DSH keeps none (an older DSH, a blank session).
+ */
+export function foldUsage(values) {
+  const t = values && values.tokenUsage
+  const st = values && values.sessionStats
+  const cp = values && values.contextPressure
+  if (!t && !st && !cp) return null
+  const n = (x) => (Number.isFinite(x) ? x : 0)
+  const u = {}
+  if (t) Object.assign(u, { in: n(t.uncachedInputTokens), out: n(t.outputTokens), cacheRead: n(t.cacheReadTokens), cacheWrite: n(t.cacheWriteTokens) })
+  if (st) {
+    Object.assign(u, { turns: n(st.turns), steps: n(st.steps), llmMs: n(st.llmMs), toolMs: n(st.toolMs) })
+    if (n(st.ttftSteps) > 0) u.ttftMs = Math.round(n(st.ttftMs) / st.ttftSteps)
+    if (n(st.decodeMs) > 0) u.tps = Math.round((n(st.decodeTokens) / st.decodeMs) * 1000)
+  }
+  if (cp && n(cp.contextWindow) > 0) Object.assign(u, { ctx: n(cp.pressureTokens), window: cp.contextWindow, ctxPct: Math.round((n(cp.pressureTokens) / cp.contextWindow) * 100) })
+  return u
+}

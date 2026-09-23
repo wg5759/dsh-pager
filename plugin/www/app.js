@@ -94,6 +94,7 @@
     xc: '<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',
     bulb: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
     zap: '<path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"/>',
+    stats: '<path d="M5 20V11M12 20V5M19 20v-8"/>',
   }
   function ic(n, cls) { return '<svg class="i' + (cls ? ' ' + cls : '') + '" viewBox="0 0 24 24" aria-hidden="true">' + (P[n] || P.other) + '</svg>' }
   var KI = { execute: 'execute', read: 'read', edit: 'edit', search: 'search', web: 'web', fetch: 'web', agent: 'agent', delete: 'delete', move: 'edit', think: 'bulb', other: 'other' }
@@ -841,6 +842,7 @@
     if (isAgent(c.id)) sub += esc(ag ? ag.name + (ag.project ? ' · ' + ag.project : '') : '')
     else sub += esc(wsTitle(wsOf(c.id)))
     if (c.model && !isAgent(c.id)) sub += ' · ' + esc(modelName(c))
+    if (s && s.cx >= 70) sub += ' · <span class="warn">上下文 ' + s.cx + '%</span>'
     el.cSub.innerHTML = sub
   }
   function userHtml(c, it) {
@@ -1197,6 +1199,7 @@
     openSheet('<div class="sh-h">' + esc(el.cTitle.textContent) + '</div><div class="sh-b">' +
       '<button class="opt-row" data-a="model"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>切换模型</b><small>' + esc(modelName(c) || '当前模型') + '</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="files"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>工作区文件</b><small>' + esc(wsTitle(wsOf(c.id))) + '</small></span>' + ic('chev', 's') + '</button>' +
+      '<button class="opt-row" data-a="usage"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>用量</b><small>token、缓存命中、上下文占用、耗时</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="rename"><span class="ico">' + ic('pen', 's') + '</span><span class="mid"><b>重命名</b></span></button>' +
       '<button class="opt-row danger" data-a="archive"><span class="ico">' + ic('archive', 's') + '</span><span class="mid"><b>归档对话</b><small>从列表隐藏，记录仍保存在电脑上</small></span></button></div>')
     el.sheet.onclick = function (e) {
@@ -1208,6 +1211,7 @@
         if (a === 'model') modelSheet()
         else if (a === 'files') fvOpen({ kind: 'path', s: c.id, path: '', title: wsTitle(wsOf(c.id)) || '工作区' })
         else if (a === 'rename') renameSheet()
+        else if (a === 'usage') usageSheet(c)
         else if (a === 'archive') archive(c.id)
       })
     }
@@ -1281,6 +1285,64 @@
         if (!label || !text) { toast('名称和内容都要填'); return }
         save(v.items.concat([{ label: label, text: text }]))
       }
+    }
+  }
+  // ------------------------------------------------------------ usage
+  // DSH keeps per-session totals (tokens, time, context pressure); the plugin reads them from
+  // session.list. They are cumulative per session, so "last 7 days" means sessions active then.
+  function fmtTok(n) {
+    n = n || 0
+    if (n < 1000) return String(n)
+    if (n < 1e6) return (n / 1e3).toFixed(n < 1e4 ? 1 : 0).replace(/\.0$/, '') + 'K'
+    return (n / 1e6).toFixed(2).replace(/\.?0+$/, '') + 'M'
+  }
+  function hitRate(u) { var t = (u.cacheRead || 0) + (u.in || 0); return t ? Math.round((u.cacheRead || 0) / t * 100) : null }
+  function usageBrief(u) {
+    var p = ['输出 ' + fmtTok(u.out)], h = hitRate(u)
+    if (h !== null) p.push('缓存命中 ' + h + '%')
+    if (u.ctxPct !== undefined) p.push('上下文 ' + u.ctxPct + '%')
+    return p.join(' · ')
+  }
+  function kv(pairs) {
+    return '<div class="kv">' + pairs.map(function (p) { return '<div><span>' + esc(p[0]) + '</span><b>' + esc(p[1]) + '</b></div>' }).join('') + '</div>'
+  }
+  function tokenPairs(u) {
+    var h = hitRate(u), r = [['输入（未命中缓存）', fmtTok(u.in)], ['缓存命中', fmtTok(u.cacheRead) + (h !== null ? '（' + h + '%）' : '')], ['输出', fmtTok(u.out)]]
+    if (u.cacheWrite) r.push(['缓存写入', fmtTok(u.cacheWrite)])
+    return r
+  }
+  function usageSheet(c) {
+    openSheet('<div class="sh-h">用量<small>这个会话累计，数据来自 DSH</small></div><div class="sh-b" id="us"><div class="spin"></div></div>')
+    var box = document.getElementById('us')
+    get('/m/api/usage?s=' + enc(c.id)).then(function (v) {
+      var u = v.sessions[0] && v.sessions[0].u
+      if (!u) { box.innerHTML = '<div class="qc-note">这个会话还没有用量数据。</div>'; return }
+      var r = u.out !== undefined ? tokenPairs(u) : []
+      if (u.ctxPct !== undefined) r.push(['上下文', u.ctxPct + '%（' + fmtTok(u.ctx) + ' / ' + fmtTok(u.window) + '）'])
+      if (u.turns !== undefined) r.push(['回合 / 步数', u.turns + ' / ' + u.steps])
+      if (u.llmMs) r.push(['模型耗时', dur(u.llmMs)])
+      if (u.toolMs) r.push(['工具耗时（含等你确认）', dur(u.toolMs)])
+      if (u.ttftMs) r.push(['平均首字', (u.ttftMs / 1000).toFixed(1) + ' 秒'])
+      if (u.tps) r.push(['输出速度', u.tps + ' token/秒'])
+      box.innerHTML = kv(r) + (u.ctxPct >= 70 ? '<div class="qc-note">上下文快满了：再聊下去模型会开始压缩或遗忘前面的内容，可以考虑开个新对话。</div>' : '')
+    }, function (e) { box.innerHTML = '<div class="qc-note">' + esc(e.message) + '</div>' })
+  }
+  function weekSheet() {
+    openSheet('<div class="sh-h">最近 7 天用量<small>这 7 天里有活动的会话，按会话累计；数据来自 DSH</small></div><div class="sh-b" id="us"><div class="spin"></div></div>')
+    var box = document.getElementById('us')
+    get('/m/api/usage?days=7').then(function (v) {
+      var t = v.totals
+      var h = kv([['会话 / 回合', t.sessions + ' / ' + t.turns]].concat(tokenPairs(t), [['模型耗时', dur(t.llmMs)]]))
+      if (v.sessions.length) {
+        h += '<div class="sh-sec">用得最多的会话</div>' + v.sessions.slice(0, 10).map(function (s) {
+          return '<button class="opt-row" data-open="' + esc(s.id) + '"><span class="mid"><b>' + esc(s.title || '未命名对话') + '</b><small>' + esc(usageBrief(s.u)) + '</small></span>' + ic('chev', 's') + '</button>'
+        }).join('')
+      }
+      box.innerHTML = h
+    }, function (e) { box.innerHTML = '<div class="qc-note">' + esc(e.message) + '</div>' })
+    el.sheet.onclick = function (e) {
+      var b = e.target.closest('[data-open]')
+      if (b) closeAllOverlays().then(function () { openChat(b.dataset.open) })
     }
   }
   function archive(id) {
@@ -1404,6 +1466,7 @@
       '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>重新连接</b><small>' +
       ({ online: '当前已连接', connecting: '正在连接…', offline: '电脑暂时连不上' })[S.status] + '</small></span></button>' +
       (IN_APP ? '<button class="opt-row" data-a="server"><span class="ico">' + ic('web', 's') + '</span><span class="mid"><b>切换服务器</b><small>换一台电脑，或换一个访问地址</small></span>' + ic('chev', 's') + '</button>' : '') +
+      '<button class="opt-row" data-a="usage"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>最近 7 天用量</b><small>token、缓存命中，用得最多的会话</small></span>' + ic('chev', 's') + '</button>' +
       '<div id="pushRows"></div></div>')
     var cur = { state: 'app' }
     function paintPush() {
@@ -1419,6 +1482,7 @@
       if (!b || b.disabled) return
       var a = b.dataset.a
       if (a === 'server') { location.href = 'dshapp://setup'; return }
+      if (a === 'usage') { closeOverlay().then(weekSheet); return }
       if (a === 'push-on') {
         b.disabled = true
         enablePush().then(function () { toast('已开启锁屏提醒'); buzz(); paintPush() }, function (err) { b.disabled = false; toast(err.message, 'err') })

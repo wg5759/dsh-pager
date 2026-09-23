@@ -67,7 +67,7 @@ test('demo refuses to wipe a folder it did not create', async () => {
   fs.rmSync(root, { recursive: true, force: true })
 })
 
-test('the plugin over the demo DSH: boot, and quick commands saved on the PC and validated', async () => {
+test('the plugin over the demo DSH: boot, quick commands, usage', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshp-routes-'))
   const demo = await startDemo({ root: path.join(root, 'd') })
   const mobile = createMobile({ apiPort: () => demo.port, pushDir: path.join(root, 'state'), transcripts: demo.transcripts, spawnAgent: demo.spawnAgent })
@@ -85,6 +85,19 @@ test('the plugin over the demo DSH: boot, and quick commands saved on the PC and
     const bad = await post([{ label: '', text: 'x' }])
     assert.equal(bad.status, 400)
     assert.equal((await bad.json()).error.code, 'bad-commands')
+
+    // Usage comes from DSH's per-session projections; boot only carries context pressure from 50%.
+    const boot = (await (await fetch(B + '/m/api/boot')).json()).value
+    const rss = boot.sessions.find((x) => x.title.startsWith('RSS'))
+    assert.equal(rss.cx, 74)
+    assert.equal(boot.sessions.find((x) => x.title.startsWith('首页')).cx, undefined)
+    const one = (await (await fetch(B + '/m/api/usage?s=' + encodeURIComponent(rss.id))).json()).value
+    assert.deepEqual([one.sessions.length, one.sessions[0].u.ctxPct, one.sessions[0].u.out, one.sessions[0].u.turns], [1, 74, 9800, 9])
+    const week = (await (await fetch(B + '/m/api/usage?days=7')).json()).value
+    assert.equal(week.days, 7)
+    assert.equal(week.totals.sessions, 5)
+    assert.equal(week.totals.out, 3200 + 9800 + 900 + 2100 + 600)
+    assert.equal(week.sessions[0].title, 'RSS 日期早了 8 小时') // the biggest first
   } finally {
     server.close()
     mobile.close()

@@ -219,6 +219,14 @@ export const E2E_OK = `Running 6 tests using 2 workers
 
   6 passed (14.3s)`
 
+
+/** DSH-shaped usage projections for a demo session. */
+const usage = (inTok, out, cacheRead, turns, steps, llmS, toolS, ctxPct) => ({
+  tokenUsage: { uncachedInputTokens: inTok, outputTokens: out, cacheReadTokens: cacheRead, cacheWriteTokens: 0 },
+  sessionStats: { turns, steps, llmMs: llmS * 1000, toolMs: toolS * 1000, ttftMs: steps * 640, ttftSteps: steps, decodeMs: Math.round(out / 0.21), decodeTokens: out },
+  contextPressure: { pressureTokens: ctxPct * 10000, projectedTokens: ctxPct * 10000 + 60, contextWindow: 1000000 },
+})
+
 /**
  * The demo's DSH sessions. Each: { id, w, title, at, running, events, approval?, question? }.
  * `now` anchors the timestamps so the list reads "刚刚 / 25 分钟前 / 昨天".
@@ -247,7 +255,7 @@ export function sessions(now) {
     b.result('c6', '', out('Performance: 94\nFirst Contentful Paint: 0.9 s\nLargest Contentful Paint: 1.6 s\nTotal Blocking Time: 30 ms\nCumulative Layout Shift: 0.01'), false, 21000)
     b.say('改好了，首屏最大内容绘制（LCP）从 **4.2 秒降到 1.6 秒**：\n\n- 首屏只立即加载前 4 张商品图，其余滚动到附近再加载；\n- 图片补上了宽高，布局不再跳动（CLS 0.21 → 0.01）；\n- 构建产物体积没有变化。\n\n改动只在 `ProductCard.vue` 和 `Home.vue` 两个文件。要不要顺手把商品图转成 WebP？')
     b.end('completed', 800)
-    list.push({ id: 'session-5b0c1e7a-demo-4a1f-9c55-1d2e3f4a5b01', w: 'w-shop', title: '首页首屏慢：图片懒加载', ev: b })
+    list.push({ id: 'session-5b0c1e7a-demo-4a1f-9c55-1d2e3f4a5b01', w: 'w-shop', title: '首页首屏慢：图片懒加载', ev: b, usage: usage(18400, 3200, 412000, 1, 7, 31, 38, 6) })
   }
 
   // 2. Running, waiting for an approval: export orders as CSV.
@@ -267,7 +275,7 @@ export function sessions(now) {
     b.say('按钮和导出函数写好了。现在跑一下端到端测试，确认导出结果和别的页面都没问题。')
     b.call('d4', 'pwsh', { command: 'npm run test:e2e -- orders home', description: '跑订单页和首页的端到端测试' }, term('npm run test:e2e -- orders home', '跑订单页和首页的端到端测试'))
     list.push({
-      id: 'session-8e21d4c3-demo-4b7a-8d10-6f5e4d3c2b02', w: 'w-shop', title: '订单列表导出 CSV', ev: b, running: true,
+      id: 'session-8e21d4c3-demo-4b7a-8d10-6f5e4d3c2b02', w: 'w-shop', title: '订单列表导出 CSV', ev: b, running: true, usage: usage(11200, 2100, 236000, 1, 5, 19, 7, 4),
       approval: { approvalId: 'approval-demo-01', toolName: 'pwsh', callId: 'd4', reason: '这条命令会启动浏览器跑测试，需要你确认' },
     })
   }
@@ -282,7 +290,7 @@ export function sessions(now) {
     b.result('q1', '# Changelog\n\n## v2.3\n\n- 暗色主题（跟随系统）\n- RSS 日期按北京时间输出\n- 评论区改为滚动到附近再加载\n- 代码块支持一键复制\n- 修复：标签页分页在最后一页显示空白', { card: 'read', path: 'CHANGELOG.md', totalLines: 11 })
     b.say('v2.3 一共 5 条改动，重点是暗色主题和评论区提速。动笔前确认一下语气。')
     list.push({
-      id: 'session-2f9a6b8d-demo-4c3e-a7b1-9e8d7c6b5a03', w: 'w-blog', title: '写 v2.3 发布说明', ev: b, running: true,
+      id: 'session-2f9a6b8d-demo-4c3e-a7b1-9e8d7c6b5a03', w: 'w-blog', title: '写 v2.3 发布说明', ev: b, running: true, usage: usage(3900, 600, 41000, 1, 2, 6, 1, 1),
       question: [{ id: 'tone', header: '语气', question: '发布说明用什么语气？', options: [{ label: '正式一点', description: '像产品公告' }, { label: '轻松一点', description: '像写给老读者的信' }, { label: '你来定' }] }],
     })
   }
@@ -301,7 +309,7 @@ export function sessions(now) {
     b.result('r3', '', out(' ✓ test/feed.test.js (4 tests) 12ms\n   ✓ 日期按北京时间输出\n   ✓ 跨年日期不回退\n\n Test Files  1 passed (1)\n      Tests  4 passed (4)'), false, 6000)
     b.say('已修好并补了测试，RSS 里的日期现在和网页上一致。')
     b.end('completed', 700)
-    list.push({ id: 'session-6c4d2a1b-demo-4d9f-b3e2-0a1b2c3d4e04', w: 'w-blog', title: 'RSS 日期早了 8 小时', ev: b })
+    list.push({ id: 'session-6c4d2a1b-demo-4d9f-b3e2-0a1b2c3d4e04', w: 'w-blog', title: 'RSS 日期早了 8 小时', ev: b, usage: usage(52100, 9800, 2140000, 9, 41, 118, 64, 74) })
   }
 
   // 5. Stopped two days ago.
@@ -313,7 +321,7 @@ export function sessions(now) {
     b.result('n1', '', out('Package      Current  Wanted  Latest\nvite           5.4.8   5.4.8   6.3.5\nvitest         2.1.2   2.1.2   3.2.4\n@vitejs/plugin-vue 5.1.4 5.1.4 6.0.1'), false, 4000)
     b.say('有 3 个依赖跨了大版本。我先升 vite……')
     b.end('cancelled', 3000)
-    list.push({ id: 'session-9d8e7f6a-demo-4e5d-8c7b-6a5f4e3d2c05', w: 'w-shop', title: '升级到 Node 22', ev: b })
+    list.push({ id: 'session-9d8e7f6a-demo-4e5d-8c7b-6a5f4e3d2c05', w: 'w-shop', title: '升级到 Node 22', ev: b, usage: usage(7300, 900, 88000, 1, 3, 9, 4, 3) })
   }
 
   for (const s of list) {

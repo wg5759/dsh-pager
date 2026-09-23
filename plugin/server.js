@@ -29,6 +29,8 @@
  *   POST /m/api/agents/mode  auto | phone | pc
  *   GET  /m/api/app/latest   the Android app build this PC offers (version, SHA-256),
  *   GET  /m/api/app/apk      and the APK itself: the app updates itself from here
+ *   GET  /m/api/usage        token / time usage from DSH's session projections: one session
+ *                            (?s=) or every session active in the last ?days= (default 7)
  *   GET  /m/api/commands     quick commands (short prompts kept on this PC, see commands.js)
  *   POST /m/api/commands     replace the list {items: [{id?, label, text}]}
  *
@@ -51,7 +53,7 @@ import path from 'node:path'
 import zlib from 'node:zlib'
 import crypto from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue, fullCall, resultCallId } from './fold.js'
+import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue, fullCall, resultCallId, foldUsage } from './fold.js'
 import { NotifyHub } from './notify.js'
 import { confine, describe as describeFile, parseRange, MEDIA } from './files.js'
 import { WebPush, noticePayload, defaultDir } from './push.js'
@@ -344,13 +346,43 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       const w = owner.get(s.sessionId) || null
       if (s.blank) { if (w && !blanks[w] && !s.running) blanks[w] = s.sessionId; continue }
       const v = (s.projections && s.projections.values) || {}
-      sessions.push({ id: s.sessionId, title: typeof v.title === 'string' ? v.title : '', at: s.updatedAt, run: s.running, w })
+      const row = { id: s.sessionId, title: typeof v.title === 'string' ? v.title : '', at: s.updatedAt, run: s.running, w }
+      // Context-window use, only when it starts to matter: the chat header warns from 70%.
+      const u = foldUsage(v)
+      if (u && u.ctxPct >= 50) row.cx = u.ctxPct
+      sessions.push(row)
     }
     return {
       workspaces: ws.items.map((w) => ({ id: w.workspaceId, title: w.title, path: w.path })),
       sessions,
       blanks,
     }
+  }
+
+  /** Usage from DSH's own per-session projections (cumulative per session, not per day). */
+  async function usage(url) {
+    const only = url.searchParams.get('s')
+    const days = Math.min(90, Math.max(1, Number(url.searchParams.get('days')) || 7))
+    const [ws, sl] = await Promise.all([value('workspace.list', {}), value('session.list', {})])
+    const archived = new Set(ws.archivedSessionIds || [])
+    const owner = new Map()
+    for (const w of ws.items) for (const id of w.sessionIds) owner.set(id, w.workspaceId)
+    const since = Date.now() - days * 864e5
+    const totals = { in: 0, out: 0, cacheRead: 0, cacheWrite: 0, turns: 0, llmMs: 0, sessions: 0 }
+    const rows = []
+    for (const s of sl.items) {
+      if (s.origin === 'subagent') continue
+      if (only ? s.sessionId !== only : s.blank || archived.has(s.sessionId) || !(s.updatedAt >= since)) continue
+      const v = (s.projections && s.projections.values) || {}
+      const u = foldUsage(v)
+      if (!u) continue
+      rows.push({ id: s.sessionId, title: typeof v.title === 'string' ? v.title : '', w: owner.get(s.sessionId) || null, at: s.updatedAt, u })
+      for (const k of ['in', 'out', 'cacheRead', 'cacheWrite', 'turns', 'llmMs']) totals[k] += u[k] || 0
+      totals.sessions++
+    }
+    const size = (u) => (u.in || 0) + (u.out || 0) + (u.cacheRead || 0) + (u.cacheWrite || 0)
+    rows.sort((a, b) => size(b.u) - size(a.u))
+    return { days, totals, sessions: rows.slice(0, 30) }
   }
 
   async function history(url) {
@@ -547,6 +579,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
         fs.createReadStream(b.file).on('error', () => res.destroy()).pipe(res)
         return
       }
+      if (route === 'usage' && !isPost) return json(req, res, 200, { ok: true, value: await usage(url) })
       if (route === 'commands' && !isPost) return json(req, res, 200, { ok: true, value: quick.load(dataDir) })
       if (route === 'commands' && isPost) return json(req, res, 200, { ok: true, value: quick.save(dataDir, (await readJson(req, 128 * 1024)).items) })
       if (route === 'agents/mode' && isPost) { agents.setMode((await readJson(req, 4096)).mode); return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode } }) }

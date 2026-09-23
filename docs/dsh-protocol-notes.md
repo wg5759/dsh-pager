@@ -65,6 +65,22 @@ Content-Type: application/json
 - 实测 6 个会话、每个 30 条消息，原始历史共 22.9 MB，其中 **89%** 是 `assistant/chunk`。
 - 按 `fold.js` 的方式折叠后，只保留"人写的消息 / 最终回复 / 每个工具一行 / 回合结束"，一个 4 MB 级的会话降到 20–30 KB。
 
+## 用量：会话投影
+
+不用翻历史：`session.list` 的每一项都带 `projections.values`，其中三项就是用量（整个会话累计）：
+
+```json
+"tokenUsage":      { "uncachedInputTokens": 6333, "outputTokens": 1489, "cacheReadTokens": 174848, "cacheWriteTokens": 0 },
+"sessionStats":    { "turns": 3, "steps": 9, "llmMs": 12525, "toolMs": 5035828, "ttftMs": 5967, "ttftSteps": 9, "decodeMs": 6558, "decodeTokens": 1489 },
+"contextPressure": { "pressureTokens": 21838, "projectedTokens": 21898, "contextWindow": 1000000 }
+```
+
+- `ttftMs`、`decodeMs` 是各步**之和**：平均首字延迟 = `ttftMs / ttftSteps`，输出速度 = `decodeTokens / decodeMs`。
+- `toolMs` 包含等人确认的时间，可能很大。
+- 每一步的明细也有：`assistant/message` 事件的 `data.usage` 是 `{ inputTokens, outputTokens, cacheReadTokens, reasoningTokens }`，`data.message.source` 带 `provider` 和 `model`。
+- 同一个 `values` 里还有 `title`、`todos`、`plan`、`goal`、`contextBreakdown`、`permissions` 等。
+- dsh-pager 的用法见 `plugin/fold.js` 的 `foldUsage()` 和 `plugin/server.js` 的 `usage()`。
+
 ## 应答：`POST /api/respond`
 
 ```json

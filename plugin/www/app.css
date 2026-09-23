@@ -306,6 +306,12 @@ input, textarea { font: inherit; color: inherit; }
 .sh-in input { width: 100%; height: 48px; padding: 0 14px; border-radius: 14px; border: 0; outline: 0; background: var(--sunken); font-size: 16px; }
 .sh-in .btns { margin-top: 14px; }
 .sh-in textarea { display: block; width: 100%; margin-top: 8px; padding: 10px 14px; border-radius: 14px; border: 0; outline: 0; background: var(--sunken); color: var(--text); font: inherit; font-size: 16px; line-height: 1.45; resize: none; }
+.kv { margin: 0 12px 8px; }
+.kv > div { display: flex; justify-content: space-between; gap: 12px; padding: 11px 4px; font-size: 14.5px; }
+.kv > div + div { box-shadow: 0 -1px 0 var(--line); }
+.kv span { color: var(--text2); }
+.kv b { font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+#cSub .warn { color: var(--warn); font-weight: 600; }
 .qc-note { margin: 4px 12px 8px; padding: 10px 12px; border-radius: 12px; background: var(--sunken); color: var(--text2); font-size: 13px; line-height: 1.5; }
 .opt-row .del { color: var(--text3); margin-right: -8px; }
 .opt-row .del:active { color: var(--bad); }

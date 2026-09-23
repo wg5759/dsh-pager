@@ -1,7 +1,7 @@
 // Fixtures mirror event shapes captured from real DSH session logs (2026-09-21).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { foldHistory, foldCall, foldResult, foldQueue, clip, CAP, pathsOf, fullCall, resultCallId } from '../fold.js'
+import { foldHistory, foldCall, foldResult, foldQueue, clip, CAP, pathsOf, fullCall, resultCallId, foldUsage } from '../fold.js'
 
 const ev = (seq, type, data, extra = {}) => ({ event: { type, seq, time: 1000 + seq, data }, ...extra })
 const chunk = (seq, c) => ev(seq, 'assistant/chunk', { turn: 1, step: 1, chunk: c })
@@ -191,4 +191,19 @@ test('fullCall: unclipped input, diff texts and terminal output', () => {
   assert.deepEqual([d.err, d.done, d.cut, d.paths], [true, true, undefined, ['a.md']])
   const pending = fullCall(call, null)
   assert.deepEqual([pending.done, pending.out], [undefined, undefined])
+})
+
+test('foldUsage: DSH session projections -> tokens, time, speed, context pressure', () => {
+  // Shapes as DSH 0.1.1-rc.2 reports them on session.list items (projections.values).
+  const u = foldUsage({
+    tokenUsage: { uncachedInputTokens: 6333, outputTokens: 1489, cacheReadTokens: 174848, cacheWriteTokens: 0 },
+    sessionStats: { turns: 3, steps: 9, llmMs: 12525, toolMs: 5035828, ttftMs: 5967, ttftSteps: 9, decodeMs: 6558, decodeTokens: 1489 },
+    contextPressure: { pressureTokens: 21838, projectedTokens: 21898, contextWindow: 1000000 },
+  })
+  assert.deepEqual(u, { in: 6333, out: 1489, cacheRead: 174848, cacheWrite: 0, turns: 3, steps: 9, llmMs: 12525, toolMs: 5035828, ttftMs: 663, tps: 227, ctx: 21838, window: 1000000, ctxPct: 2 })
+  assert.equal(foldUsage({ title: 'x' }), null)
+  assert.equal(foldUsage(undefined), null)
+  // Partial and odd values do not throw or produce NaN.
+  assert.deepEqual(foldUsage({ sessionStats: { turns: 1, ttftSteps: 0, decodeMs: 0 } }), { turns: 1, steps: 0, llmMs: 0, toolMs: 0 })
+  assert.equal(foldUsage({ contextPressure: { pressureTokens: 5, contextWindow: 0 } }).ctxPct, undefined)
 })

@@ -93,6 +93,7 @@
     checkc: '<circle cx="12" cy="12" r="9"/><path d="M8 12.5l2.5 2.5L16 9.5"/>',
     xc: '<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',
     bulb: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
+    zap: '<path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"/>',
   }
   function ic(n, cls) { return '<svg class="i' + (cls ? ' ' + cls : '') + '" viewBox="0 0 24 24" aria-hidden="true">' + (P[n] || P.other) + '</svg>' }
   var KI = { execute: 'execute', read: 'read', edit: 'edit', search: 'search', web: 'web', fetch: 'web', agent: 'agent', delete: 'delete', move: 'edit', think: 'bulb', other: 'other' }
@@ -222,7 +223,7 @@
   }
   var el = {}
   ;['app', 'home', 'chat', 'status', 'chips', 'list', 'rows', 'ptr', 'fab', 'searchBox', 'q', 'cTitle', 'cSub', 'scroller', 'older', 'msgs', 'tail',
-    'toBottom', 'dock', 'input', 'send', 'attach', 'file', 'thumbs', 'sheetWrap', 'sheet', 'viewer', 'toast', 'head',
+    'toBottom', 'dock', 'input', 'send', 'attach', 'quick', 'file', 'thumbs', 'sheetWrap', 'sheet', 'viewer', 'toast', 'head',
     'fv', 'fvBody', 'fvTitle', 'fvSub', 'fvAct'].forEach(function (id) { el[id] = document.getElementById(id) })
 
   function chatState(id) {
@@ -1228,6 +1229,60 @@
       else if (e.target.closest('[data-ok]')) save()
     }
   }
+  // ------------------------------------------------------------ quick commands
+  // Short prompts kept on the PC (commands.json) and shared by every phone. A tap
+  // only fills the composer: the user still reads it and presses send.
+  var cmdCache = null
+  function loadCmds() {
+    if (cmdCache && Date.now() - cmdCache.at < 60000) return Promise.resolve(cmdCache.v)
+    return get('/m/api/commands').then(function (v) { cmdCache = { at: Date.now(), v: v }; return v })
+  }
+  function quickSheet() {
+    var v = null, edit = false
+    openSheet('<div class="sh-h">快捷指令<small>存在电脑上，所有手机共用；点一条填进输入框</small></div><div class="sh-b" id="qc"><div class="spin"></div></div>')
+    var box = document.getElementById('qc')
+    function row(c) {
+      var inner = '<span class="ico">' + ic('zap', 's') + '</span><span class="mid"><b>' + esc(c.label) + '</b><small>' + esc(c.text) + '</small></span>'
+      return edit
+        ? '<div class="opt-row">' + inner + '<button class="ib del" data-del="' + esc(c.id) + '" aria-label="删除 ' + esc(c.label) + '">' + ic('delete', 's') + '</button></div>'
+        : '<button class="opt-row" data-cmd="' + esc(c.id) + '">' + inner + '</button>'
+    }
+    function paint() {
+      var h = v.note ? '<div class="qc-note">' + esc(v.note) + '</div>' : ''
+      if (!v.items.length) h += '<div class="qc-note">还没有快捷指令，点下面添加。</div>'
+      h += v.items.map(row).join('')
+      h += edit
+        ? '<div class="sh-sec">添加一条</div><div class="sh-in"><input id="qcL" maxlength="16" placeholder="名称，例如：跑测试" enterkeyhint="next">' +
+          '<textarea id="qcT" maxlength="2000" rows="3" placeholder="要发给它的话"></textarea>' +
+          '<div class="btns"><button class="btn" data-done>完成</button><button class="btn pri" data-add>添加</button></div></div>'
+        : '<div class="sh-in"><div class="btns"><button class="btn" data-edit>管理指令</button></div></div>'
+      box.innerHTML = h
+    }
+    function save(items) {
+      return post('/m/api/commands', { items: items }).then(function (r) { v = r; cmdCache = { at: Date.now(), v: r }; paint(); buzz() }, function (e) { toast(e.message, 'err') })
+    }
+    loadCmds().then(function (r) { v = r; paint() }, function (e) { box.innerHTML = '<div class="qc-note">' + esc(e.message) + '</div>' })
+    el.sheet.onclick = function (e) {
+      if (!v) return
+      var b
+      if ((b = e.target.closest('[data-cmd]'))) {
+        var c = v.items.filter(function (x) { return x.id === b.dataset.cmd })[0]
+        if (!c) return
+        var cur = el.input.value.replace(/\s+$/, '')
+        el.input.value = cur ? cur + '\n' + c.text : c.text
+        autosize(); syncSend(); saveDraft()
+        closeOverlay()
+        setTimeout(function () { el.input.focus() }, 360)
+      } else if (e.target.closest('[data-edit]')) { edit = true; paint() }
+      else if (e.target.closest('[data-done]')) { edit = false; paint() }
+      else if ((b = e.target.closest('[data-del]'))) { save(v.items.filter(function (x) { return x.id !== b.dataset.del })) }
+      else if (e.target.closest('[data-add]')) {
+        var label = document.getElementById('qcL').value.trim(), text = document.getElementById('qcT').value.trim()
+        if (!label || !text) { toast('名称和内容都要填'); return }
+        save(v.items.concat([{ label: label, text: text }]))
+      }
+    }
+  }
   function archive(id) {
     rpc('workspace.archiveSession', { sessionId: id }).then(function () {
       S.sessions = S.sessions.filter(function (s) { return s.id !== id })
@@ -1528,6 +1583,7 @@
   el.input.addEventListener('input', function () { autosize(); syncSend() })
   el.send.onclick = function () { if (el.send.classList.contains('stop')) stop(); else send() }
   el.attach.onclick = function () { el.file.click() }
+  el.quick.onclick = quickSheet
   el.file.onchange = function () {
     var files = Array.prototype.slice.call(el.file.files || [], 0, Math.max(0, 6 - S.att.length))
     el.file.value = ''

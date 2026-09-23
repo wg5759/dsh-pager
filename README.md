@@ -54,6 +54,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
         ├─ /m/api/push/*       iPhone 锁屏提醒（网页推送，端到端加密）
         ├─ /m/api/agents/*     Claude Code / Codex：钩子入口、会话记录、从手机继续
         ├─ /m/api/app/*        App 内更新（安装包在你自己的电脑上）
+        ├─ /m/api/commands     快捷指令（存在电脑上，所有手机共用）
         └─ /m/api/rpc|respond  发消息 / 停止 / 换模型 / 审批 / 回答提问（白名单）
 ```
 
@@ -90,6 +91,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
   - 选择题直接点选项；
   - 完成后直接回复下一条指令。
 - **App 内更新、分享到 DSH**：电脑上有新版本时，手机点一下就更新，不用再插线；在其他 App 里"分享"文字和图片给 DSH，选好对话即可。
+- **快捷指令**："跑测试""总结改动"这类常用的话存在电脑上（`~/.dsh-pager/commands.json`），所有手机共用；输入框旁点 ⚡ 选一条就填进去，看一眼再发。
 - **省流量**：插件在电脑上把原始事件折叠成"用户消息 / 回复 / 每个工具一行 / 回合结束"，再压缩下发。
 - **界面热更新**：界面跑在电脑上，App 只是外壳。改完界面，手机下拉刷新就生效，不用重装。
 - **不增加暴露面**：挂在 DSH 自己的 web 服务上，不开新端口，DSH 仍只绑 127.0.0.1。
@@ -216,7 +218,7 @@ node tools/install-hooks.mjs codex      # Codex（装好后在 Codex 里输入 /
 ## 开发
 
 ```bash
-cd plugin && npm test                 # 插件单测（62 项，含 RFC 8291 官方测试向量）
+cd plugin && npm test                 # 插件单测（65 项，含 RFC 8291 官方测试向量）
 node --test tools/*.test.mjs          # 转发器、钩子安装器单测
 node tools/make-icons.mjs             # 重新生成网页 App 图标
 node plugin/dev.mjs                   # 独立开发服务器 http://127.0.0.1:3090/m/，直连本机 DSH，改服务端代码不用重启 DSH
@@ -229,7 +231,7 @@ bash android/build.sh public          # 编译 App（无 Gradle，需 Android SD
 
 ```
 plugin/     DSH 插件：index.js 挂载 · server.js 接口与实时桥 · fold.js 事件折叠 · notify.js 提醒中枢
-            files.js 结果查看器（只读、限工作区）· push.js 网页推送 · www/ 手机界面、Service Worker、Web App 清单
+            files.js 结果查看器（只读、限工作区）· push.js 网页推送 · commands.js 快捷指令 · www/ 手机界面、Service Worker、Web App 清单
             agents.js Claude Code / Codex 钩子中枢 · presence.js 是否在电脑前 · transcripts.js 读它们的会话文件
             demo/ 演示模式（fake-dsh.mjs 按 DSH 线协议提供虚构数据）
 android/    App 外壳：MainActivity（WebView、首次配置、App 内更新、分享）· NotifyService（后台提醒）

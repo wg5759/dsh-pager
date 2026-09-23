@@ -29,6 +29,8 @@
  *   POST /m/api/agents/mode  auto | phone | pc
  *   GET  /m/api/app/latest   the Android app build this PC offers (version, SHA-256),
  *   GET  /m/api/app/apk      and the APK itself: the app updates itself from here
+ *   GET  /m/api/commands     quick commands (short prompts kept on this PC, see commands.js)
+ *   POST /m/api/commands     replace the list {items: [{id?, label, text}]}
  *
  * This module talks to DSH only through its public loopback wire protocol
  * (POST /api/<method>, WS /api/events.mux|host), exactly like DSH's own web
@@ -57,6 +59,7 @@ import { spawn } from 'node:child_process'
 import { AgentHub, SOURCES, resolveBins } from './agents.js'
 import { createPresence } from './presence.js'
 import { foldFile, recentFiles, headMeta } from './transcripts.js'
+import * as quick from './commands.js'
 
 const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 const WWW = path.join(PLUGIN_DIR, 'www')
@@ -544,6 +547,8 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
         fs.createReadStream(b.file).on('error', () => res.destroy()).pipe(res)
         return
       }
+      if (route === 'commands' && !isPost) return json(req, res, 200, { ok: true, value: quick.load(dataDir) })
+      if (route === 'commands' && isPost) return json(req, res, 200, { ok: true, value: quick.save(dataDir, (await readJson(req, 128 * 1024)).items) })
       if (route === 'agents/mode' && isPost) { agents.setMode((await readJson(req, 4096)).mode); return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode } }) }
       if (route === 'push/key' && !isPost) return json(req, res, 200, { ok: true, value: { publicKey: push.publicKey(), devices: push.list().length } })
       if (route === 'push/subscribe' && isPost) {

@@ -3,9 +3,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import http from 'node:http'
 import { startDemo } from '../demo/fake-dsh.mjs'
 import { foldHistory } from '../fold.js'
 import { recentFiles, foldFile } from '../transcripts.js'
+import { createMobile } from '../server.js'
 
 const call = async (port, method, payload = {}) => {
   const r = await fetch(`http://127.0.0.1:${port}/api/${method}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'client-request', rpcId: 'r1', method, payload }) })
@@ -63,4 +65,30 @@ test('demo refuses to wipe a folder it did not create', async () => {
   await assert.rejects(startDemo({ root }), /not a demo folder/)
   assert.equal(fs.readFileSync(path.join(root, 'keep.txt'), 'utf8'), 'mine')
   fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('the plugin over the demo DSH: boot, and quick commands saved on the PC and validated', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshp-routes-'))
+  const demo = await startDemo({ root: path.join(root, 'd') })
+  const mobile = createMobile({ apiPort: () => demo.port, pushDir: path.join(root, 'state'), transcripts: demo.transcripts, spawnAgent: demo.spawnAgent })
+  const server = http.createServer((req, res) => mobile.handle(req, res))
+  await new Promise((r) => server.listen(0, '127.0.0.1', r))
+  const B = `http://127.0.0.1:${server.address().port}`
+  const post = (items) => fetch(B + '/m/api/commands', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) })
+  try {
+    assert.deepEqual((await (await fetch(B + '/m/api/boot')).json()).value.workspaces.map((w) => w.title), ['shop-web', 'blog'])
+    assert.equal((await (await fetch(B + '/m/api/commands')).json()).value.items[0].label, '跑测试')
+    const saved = await (await post([{ label: '部署预览', text: '构建并部署到预览环境' }])).json()
+    assert.deepEqual(saved.value.items.map((c) => c.label), ['部署预览'])
+    assert.deepEqual((await (await fetch(B + '/m/api/commands')).json()).value.items.map((c) => c.text), ['构建并部署到预览环境'])
+    assert.ok(fs.existsSync(path.join(root, 'state', 'commands.json')))
+    const bad = await post([{ label: '', text: 'x' }])
+    assert.equal(bad.status, 400)
+    assert.equal((await bad.json()).error.code, 'bad-commands')
+  } finally {
+    server.close()
+    mobile.close()
+    demo.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
 })

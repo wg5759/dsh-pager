@@ -144,6 +144,7 @@ public class NotifyService extends Service {
     @Override
     public void onDestroy() {
         running = false;
+        link("off");
         kick();
         try {
             cm.unregisterNetworkCallback(netCb);
@@ -179,6 +180,7 @@ public class NotifyService extends Service {
                 Log.i(TAG, "stream ended by server");
             } catch (LoginRequired e) {
                 Log.w(TAG, "login required");
+                link("login");
                 if (!loginNotified) {
                     loginNotified = true;
                     simple(ID_LOGIN, CH_ALERT, "DSH 需要重新登录", "登录已过期，点开 App 登录一次即可恢复提醒", null);
@@ -187,6 +189,7 @@ public class NotifyService extends Service {
                 continue;
             } catch (Exception e) {
                 // offline, home PC down, or DSH restarting: retry with backoff
+                link("off");
                 Log.w(TAG, "stream failed: " + e.getClass().getSimpleName() + ": " + e.getMessage() + " (retry in " + backoff / 1000 + "s)");
             }
             nap(backoff);
@@ -210,6 +213,7 @@ public class NotifyService extends Service {
             Log.i(TAG, "connect since=" + since + " -> HTTP " + code);
             if (code == 401 || (code >= 300 && code < 400)) throw new LoginRequired();
             if (code != 200) throw new IOException("HTTP " + code);
+            link("ok");
             if (loginNotified) {
                 loginNotified = false;
                 nm.cancel(ID_LOGIN);
@@ -245,6 +249,10 @@ public class NotifyService extends Service {
         long n = f.optLong("n", -1);
         if (n > prefs.getLong("n", -1)) prefs.edit().putLong("n", n).apply();
         switch (t) {
+            case "st": // counts for the home-screen widget; a snapshot, never numbered
+                prefs.edit().putInt("w_run", f.optInt("run", 0)).putInt("w_asks", f.optInt("asks", 0)).apply();
+                StatusWidget.refresh(this);
+                break;
             case "ask":
                 if (alerted.add("a:" + f.optString("id")) || !f.optBoolean("replay")) postAsk(f);
                 break;
@@ -258,9 +266,11 @@ public class NotifyService extends Service {
                 nm.cancel(idFor("q:" + f.optString("rpc")));
                 break;
             case "done":
+                lastTask(f, "done");
                 if (!appVisible) postDone(f);
                 break;
             case "err":
+                lastTask(f, "err");
                 if (!appVisible) postError(f);
                 break;
             case "info": // e.g. Claude Code waiting at the PC for a dialog the phone could not take
@@ -269,6 +279,19 @@ public class NotifyService extends Service {
             default:
                 break;
         }
+    }
+
+    /** Connection state for the widget ("ok", "off", "login"); redraws only on a change. */
+    private void link(String state) {
+        if (state.equals(prefs.getString("w_link", ""))) return;
+        prefs.edit().putString("w_link", state).apply();
+        StatusWidget.refresh(this);
+    }
+
+    /** The last finished (or failed) task, shown on the widget. */
+    private void lastTask(JSONObject f, String kind) {
+        prefs.edit().putString("w_last_title", f.optString("title")).putString("w_last_kind", kind).putLong("w_last_at", System.currentTimeMillis()).apply();
+        StatusWidget.refresh(this);
     }
 
     // ------------------------------------------------------------------ notifications

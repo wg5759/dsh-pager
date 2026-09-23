@@ -78,6 +78,8 @@ export class NotifyHub {
     this.calls = new Map()
     this.asks = new Map()
     this.qs = new Map()
+    this.running = new Set()
+    this.lastState = ''
     this.sockets = []
     this.started = false
     this.stopped = false
@@ -109,11 +111,15 @@ export class NotifyHub {
   async refresh() {
     try {
       const v = await this.listSessions()
+      const running = new Set()
       for (const s of v.items || []) {
         const t = s.projections && s.projections.values && s.projections.values.title
         if (typeof t === 'string' && t) this.titles.set(s.sessionId, t)
         if (s.origin === 'subagent') this.sub.add(s.sessionId)
+        if (s.running) running.add(s.sessionId)
       }
+      this.running = running
+      this.pushState()
     } catch (err) {
       this.log(`notify: session list failed: ${err && err.message}`)
     }
@@ -162,7 +168,24 @@ export class NotifyHub {
     if (this.buf.length > 200) this.buf.shift()
     for (const c of this.clients) c.send(ev)
     for (const fn of this.listeners || []) { try { fn(ev) } catch (err) { this.log(`notice listener failed: ${err && err.message}`) } }
+    this.pushState()
     return ev
+  }
+
+  /** Counts for the phone's home-screen widget: DSH sessions running, and everything waiting for you. */
+  state() {
+    let run = 0
+    for (const id of this.running) if (!this.sub.has(id)) run++
+    return { run, asks: this.asks.size + this.qs.size + (this.extAsks ? this.extAsks.size : 0) }
+  }
+
+  /** Tell every phone when the counts change. A snapshot: not numbered, never replayed. */
+  pushState() {
+    const st = this.state()
+    const key = `${st.run}/${st.asks}`
+    if (key === this.lastState) return
+    this.lastState = key
+    for (const c of this.clients) c.send({ t: 'st', ...st })
   }
 
   /**
@@ -268,7 +291,11 @@ export class NotifyHub {
   onHost(env) {
     const f = env && env.payload
     if (!f) return
-    if (f.type === 'host/session-added' && f.origin === 'subagent') this.sub.add(f.sessionId)
+    if (f.type === 'host/session-status') {
+      if (f.running) this.running.add(f.sessionId)
+      else this.running.delete(f.sessionId)
+      this.pushState()
+    } else if (f.type === 'host/session-added' && f.origin === 'subagent') this.sub.add(f.sessionId)
     else if (f.type === 'host/agent-error' && !this.sub.has(f.sessionId)) this.emit({ t: 'err', s: f.sessionId, title: this.title(f.sessionId), msg: f.message })
   }
 
@@ -301,6 +328,7 @@ export class NotifyHub {
     for (const a of this.asks.values()) client.send({ ...a, replay: true })
     for (const a of (this.extAsks || new Map()).values()) client.send({ ...a, replay: true })
     for (const q of this.qs.values()) client.send({ ...q, replay: true })
+    client.send({ t: 'st', ...this.state() })
     this.clients.add(client)
     const ping = setInterval(() => client.send({ t: 'p' }), Math.min(300, Math.max(20, hb)) * 1000)
     req.on('close', () => client.close())

@@ -130,11 +130,11 @@ test('reconnect replays missed notices of the same epoch, plus pending asks', ()
   h.asks.set('ap9', { t: 'ask', s: 'c', id: 'ap9', rpc: 'r9', n: 0 })
   const c = fakeSse()
   h.subscribe(c.req, c.res, { since: 1, epoch: h.epoch, hb: 120 })
-  assert.deepEqual(c.frames.map((f) => f.t + (f.s ? ':' + f.s : '')), ['hello', 'done:b', 'ask:c'])
+  assert.deepEqual(c.frames.map((f) => f.t + (f.s ? ':' + f.s : '')), ['hello', 'done:b', 'ask:c', 'st'])
   assert.equal(c.frames[2].replay, true)
   const other = fakeSse()
   h.subscribe(other.req, other.res, { since: 1, epoch: 'old-epoch', hb: 120 })
-  assert.deepEqual(other.frames.map((f) => f.t), ['hello', 'ask']) // DSH restarted: nothing to replay
+  assert.deepEqual(other.frames.map((f) => f.t), ['hello', 'ask', 'st']) // DSH restarted: nothing to replay; then the counts
   c.req.emit('close')
   other.req.emit('close')
   assert.equal(h.clients.size, 0)
@@ -149,4 +149,28 @@ test('settled-while-away approvals are withdrawn after a hub reconnect', () => {
   h.onMux(mux({ type: 'approval/requested', sessionId: 's5', approvalId: 'still', toolName: 'pwsh' }, 'r-still')) // replayed: already known
   h.settleReplay()
   assert.deepEqual(out.map((e) => e.t + ':' + e.id), ['askDone:old'])
+})
+
+test('st frames: running DSH sessions and everything waiting, sent only when they change', async () => {
+  const h = new NotifyHub({ wsBase: () => 'ws://unused', listSessions: async () => ({ items: [{ sessionId: 's1', running: true }, { sessionId: 'sub', running: true, origin: 'subagent' }, { sessionId: 's2', running: false }] }) })
+  const got = []
+  h.clients.add({ send: (e) => { if (e.t === 'st') got.push(`${e.run}/${e.asks}`) } })
+  await h.refresh()
+  assert.deepEqual(got, ['1/0']) // the subagent does not count
+  h.onHost(mux({ type: 'host/session-status', sessionId: 's2', running: true }))
+  h.onHost(mux({ type: 'host/session-status', sessionId: 's2', running: true })) // unchanged: nothing sent
+  h.onMux(mux({ type: 'approval/requested', sessionId: 's1', approvalId: 'a1', toolName: 'pwsh', callId: 'c1' }, 'rpc-a1'))
+  h.externalAsk({ id: 'x1', s: 'agent:claude:k', title: 'Claude Code', rpc: 'agent:x1', tool: 'Bash', what: 'ls', detail: 'ls' })
+  h.onMux(mux({ type: 'question/requested', sessionId: 's2', questions: [{ id: 'q', question: '?' }] }, 'rpc-q'))
+  h.onMux(mux({ type: 'approval/resolved', sessionId: 's1', approvalId: 'a1', outcome: 'allowed-once' }))
+  h.externalAskDone('x1', 'rejected')
+  h.onHost(mux({ type: 'host/session-status', sessionId: 's1', running: false }))
+  assert.deepEqual(got, ['1/0', '2/0', '2/1', '2/2', '2/3', '2/2', '2/1', '1/1'])
+  // A phone that connects now gets the current snapshot right away.
+  const res = { writeHead() {}, write(chunk) { this.out = (this.out || '') + chunk }, end() {} }
+  const req = new EventEmitter()
+  h.started = true // no DSH sockets in a unit test
+  h.subscribe(req, res, {})
+  assert.match(res.out, /"t":"st","run":1,"asks":1/)
+  req.emit('close')
 })

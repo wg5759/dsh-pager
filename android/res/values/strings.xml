@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">DSH</string>
+    <string name="widget_desc">等你确认的操作、在跑的会话、最近完成的任务</string>
 </resources>

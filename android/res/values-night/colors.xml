@@ -1,4 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="bg">#FF0E1014</color>
+    <!-- Home-screen widget -->
+    <color name="w_bg">#E6202329</color>
+    <color name="w_text">#FFF2F3F5</color>
+    <color name="w_sub">#FF9AA0A8</color>
+    <color name="w_warn">#FFFFB224</color>
+    <color name="w_ok">#FF4ADE80</color>
 </resources>

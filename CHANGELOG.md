@@ -13,7 +13,7 @@
 
 ## 1.3.2 — 2026-09-22
 
-- **接入 Claude Code 和 Codex**（见 [docs/agents.md](docs/agents.md)）：
+- **接入 Claude Code 和 Codex**（见 [docs/claude-code-codex.md](docs/claude-code-codex.md)）：
   - 离开电脑时，它们的确认请求发到手机，可以允许、拒绝，Claude Code 还能"允许并记住"；有人回到电脑时立刻交还电脑。
   - 完成时提醒；手机上查看最近 7 天的会话记录，并能从手机继续对话。
   - `tools/install-hooks.mjs` 负责安装和卸载钩子：合并、不覆盖，写入前备份。

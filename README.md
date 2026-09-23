@@ -1,7 +1,7 @@
 # dsh-pager
 
 **DeepSeek Harness 的"寻呼机"**：一个 DSH 插件，加一个约 40 KB 的安卓 App；iPhone 把网页添加到主屏幕即可。
-人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。电脑上的 **Claude Code 和 Codex** 也能一起管（见 [docs/agents.md](docs/agents.md)）。
+人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。电脑上的 **Claude Code 和 Codex** 也能一起管（见 [docs/claude-code-codex.md](docs/claude-code-codex.md)）。
 
 > 非官方社区项目，与 DeepSeek 没有关联。· [English](#english)
 
@@ -204,7 +204,7 @@ node tools/install-hooks.mjs claude     # Claude Code
 node tools/install-hooks.mjs codex      # Codex（装好后在 Codex 里输入 /hooks 信任一次）
 ```
 
-详见 [docs/agents.md](docs/agents.md)。
+详见 [docs/claude-code-codex.md](docs/claude-code-codex.md)。
 
 ## 安全须知
 
@@ -272,7 +272,7 @@ Together they let you follow sessions, send prompts, and approve or reject tool 
   - Zero npm dependencies.
   - About 2,500 lines of server JS and a vanilla JS UI that hot-reloads on the phone.
   - A 1,300-line Java shell built without Gradle, with in-app updates served from your own PC.
-- **Claude Code and Codex too.** Hooks route their permission prompts to the phone while you are away (screen locked or 3 min idle) and hand them back the moment you touch the PC; you can also read their sessions and continue them from the phone. See [docs/agents.md](docs/agents.md).
+- **Claude Code and Codex too.** Hooks route their permission prompts to the phone while you are away (screen locked or 3 min idle) and hand them back the moment you touch the PC; you can also read their sessions and continue them from the phone. See [docs/claude-code-codex.md](docs/claude-code-codex.md).
 
 Try the UI without DSH: `node plugin/dev.mjs --demo` serves made-up projects and sessions from a fake DSH at http://127.0.0.1:3090/m/ (the screenshots above come from it).
 

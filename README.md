@@ -59,18 +59,20 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 
 ## 真机实测
 
-实测环境：Redmi（HyperOS / Android 16），经公网链路连回家里电脑（2026-09-21）。
+实测环境：Redmi（HyperOS / Android 16）与华为平板（HarmonyOS 4.2），经公网链路连回家里电脑（2026-09-21 至 09-22）。
 
 | 项目 | 结果 |
 |---|---|
-| 安装包 | **41 KB**（4 个 Java 文件，零第三方库；1.3.0） |
+| 安装包 | **41 KB**（5 个 Java 文件，零第三方库；1.3.2） |
 | 打开 4 MB 级长会话 | 下发 **28 KB**，1.45 秒 |
 | 首页（工作区 + 会话列表） | 2.4 KB |
 | 冷启动 | 首帧 195 ms，0.39 秒出列表（本地缓存），0.87 秒刷新到最新 |
 | 发消息到出第一段文字 | 1.8 秒，之后逐字流式 |
 | 后台提醒 | 息屏状态下 2–30 秒送达；连续 15 分钟心跳，零重连 |
+| 锁屏通知点"允许" | 华为平板锁屏下点击 → 弹出解锁 → 解锁后放行送达，真实 Claude Code 钩子收到结果 |
+| App 内更新 | Redmi 从 1.3.0 在手机上完成到 1.3.2 的下载、校验和安装，全程未接电脑 |
 
-同一套 App 还在华为平板（HarmonyOS 4.2）上跑通了首次配置、地址校验和后台服务。
+同一套 App 还在华为平板上跑通了首次配置、地址校验和后台服务。
 
 ## 亮点
 
@@ -97,7 +99,7 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
 - **只用 DSH 公开的线协议**（`POST /api/<方法>`、`/api/events.*`），不依赖 DSH 内部模块，DSH 升级时不容易坏。
 - **小而可审计**：
   - 服务端约 2,500 行原生 JS，零 npm 依赖（网页推送的加密和签名也是用 Node 自带的 crypto 写的）；界面是原生 JS/CSS，无框架。
-  - App 约 1,200 行 Java、无 Gradle，一条命令即可复现构建。
+  - App 约 1,300 行 Java、无 Gradle，一条命令即可复现构建。
 
 ## 与同类项目对比
 
@@ -265,7 +267,7 @@ Together they let you follow sessions, send prompts, and approve or reject tool 
 - **Small and auditable.**
   - Zero npm dependencies.
   - About 2,500 lines of server JS and a vanilla JS UI that hot-reloads on the phone.
-  - A 1,200-line Java shell built without Gradle, with in-app updates served from your own PC.
+  - A 1,300-line Java shell built without Gradle, with in-app updates served from your own PC.
 - **Claude Code and Codex too.** Hooks route their permission prompts to the phone while you are away (screen locked or 3 min idle) and hand them back the moment you touch the PC; you can also read their sessions and continue them from the phone. See [docs/agents.md](docs/agents.md).
 
 Try the UI without DSH: `node plugin/dev.mjs --demo` serves made-up projects and sessions from a fake DSH at http://127.0.0.1:3090/m/ (the screenshots above come from it).

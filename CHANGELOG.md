@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- **修复：电脑上以 App 窗口打开的 DSH 被跳到了手机界面**（1.3.2 引入）。给 iPhone 主屏幕 App 做的"落在首页就回到 /m/"判断用了 `display-mode: standalone`，而电脑上装成 App 的 DSH 窗口也满足这个条件。现在只认 iPhone / iPad 的主屏幕 App（`navigator.standalone` 且有触摸屏）。
 - **App 1.4.0：桌面小组件**（用 App 内更新安装，不用插线）：
   - 显示几个等你确认（DSH 审批和提问、Claude Code / Codex 的确认请求）、几个 DSH 会话在跑、连接状态和最近完成的任务；点一下打开 App。
   - 不联网、不定时刷新：插件在数字变化时通过后台提醒的连接推一个 `st` 帧，后台服务收到后重画。旧版 App 会忽略这个帧。

@@ -21,12 +21,14 @@ export const name = 'mobile'
 export const inject = ['webServer']
 
 /**
- * Injected into DSH's own page at `/`: the installed web app (iPhone "Add to
- * Home Screen") lands there after a gateway login that redirects to `/`, and
- * has no address bar to get back to /m/. Only standalone app windows move; a
- * normal browser tab keeps the desktop UI.
+ * Injected into DSH's own page at `/`: the iPhone / iPad home-screen web app
+ * lands there after a gateway login that redirects to `/`, and has no address
+ * bar to get back to /m/. Only that app moves: `navigator.standalone` exists on
+ * Apple devices alone, and a touch screen rules out a Mac's web apps. It must
+ * NOT be `display-mode: standalone`: DSH installs as a desktop app too, and its
+ * window on the PC would be sent to the phone UI (it was, 2026-09-24).
  */
-const STANDALONE_TO_M = "(function(){try{if(location.pathname==='/'&&(navigator.standalone===true||matchMedia('(display-mode: standalone)').matches))location.replace('/m/')}catch(e){}})()"
+export const STANDALONE_TO_M = "(function(){try{if(location.pathname==='/'&&navigator.standalone===true&&navigator.maxTouchPoints>0)location.replace('/m/')}catch(e){}})()"
 
 /**
  * @param ctx - Cordis context carrying the injected `webServer`.

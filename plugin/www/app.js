@@ -94,6 +94,7 @@
     xc: '<circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/>',
     bulb: '<path d="M9 18h6M10 21h4M12 3a6 6 0 0 0-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0 0 12 3z"/>',
     zap: '<path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"/>',
+    steer: '<path d="M12 20V5M6 11l6-6 6 6"/><path d="M4 20h4M16 20h4"/>',
     stats: '<path d="M5 20V11M12 20V5M19 20v-8"/>',
   }
   function ic(n, cls) { return '<svg class="i' + (cls ? ' ' + cls : '') + '" viewBox="0 0 24 24" aria-hidden="true">' + (P[n] || P.other) + '</svg>' }
@@ -107,43 +108,71 @@
   // ------------------------------------------------------------ markdown
   // Escape first, then add a closed set of constructs; raw HTML never passes.
   var LI = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/
-  function inline(s) {
+  function localPath(p) {
+    p = String(p || '').trim().replace(/^<|>$/g, '').replace(/^`|`$/g, '')
+    if (/^file:\/\/\//i.test(p)) p = p.replace(/^file:\/\/\//i, '/')
+    else if (/^[a-z][a-z0-9+.-]*:/i.test(p) && !/^[a-z]:[\\/]/i.test(p)) return null
+    try { p = decodeURIComponent(p) } catch (e) { return null }
+    p = p.replace(/^\/([a-z]:[\\/])/i, '$1').replace(/:\d+(?::\d+)?$/, '')
+    if (!p || /[\x00-\x1f<>"|?*]/.test(p) || /^(?:[\\/]{2})/.test(p)) return null
+    if (!/^(?:[a-z]:[\\/]|\/|\.{1,2}[\\/])/i.test(p) && !/[\\/]|\.[a-z0-9]{1,8}$/i.test(p)) return null
+    if (/(^|[\\/])\.\.([\\/]|$)/.test(p)) return null
+    return p
+  }
+  function videoPath(p) { return /\.(mp4|m4v|webm|mov)$/i.test(p) }
+  function pathLink(p, label, ctx) {
+    p = localPath(p)
+    if (!ctx || !p || !inRoot(p, ctx.root)) return null
+    if (ctx.paths.indexOf(p) < 0) ctx.paths.push(p)
+    return '<button class="file-link" ' + (videoPath(p) ? 'data-open-video' : 'data-result-path') + '="' + esc(p) + '">' + esc(label || p) + '</button>'
+  }
+  function inline(s, ctx) {
     var codes = []
-    s = String(s).replace(/`([^`]+)`/g, function (_, c) { codes.push(c); return '' + (codes.length - 1) + '' })
+    function token(h) { codes.push(h); return '\u0001' + (codes.length - 1) + '\u0002' }
+    s = String(s).replace(/\[([^\]]+)\]\((<[^>\n]+>|[^)\n]+)\)/g, function (all, label, p) {
+      var link = pathLink(p, label, ctx)
+      return link ? token(link) : all
+    })
+    s = s.replace(/`([^`]+)`/g, function (_, c) { return token(pathLink(c, c, ctx) || '<code>' + esc(c) + '</code>') })
+    // Quoted/Markdown paths support spaces; plain URLs and commands stay text.
+    s = s.replace(/(^|[\s（(])((?:\/?[a-z]:[\\/]|\.?[\w\u3400-\u9fff-]+[\\/])[^\s<>"'`|，。；！？()]+)(?=$|[\s，。；！？)])/gi, function (all, prefix, p) {
+      var link = pathLink(p, p, ctx)
+      return link ? prefix + token(link) : all
+    })
     s = esc(s)
     s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, function (_, t, u) { return '<a href="' + u + '">' + t + '</a>' })
     s = s.replace(/(^|[\s(（：:，,])(https?:\/\/[^\s<>()（）]+[^\s<>()（）.,;:!?。，；：！？'"])/g, function (_, p, u) { return p + '<a href="' + u + '">' + u + '</a>' })
     s = s.replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<b>$1</b>')
     s = s.replace(/(^|[^*\w])\*(?=\S)([^*]*?\S)\*(?![*\w])/g, '$1<i>$2</i>')
     s = s.replace(/~~(?=\S)([^~]*?\S)~~/g, '<s>$1</s>')
-    return s.replace(/(\d+)/g, function (_, n) { return '<code>' + esc(codes[n]) + '</code>' })
+    return s.replace(/\u0001(\d+)\u0002/g, function (_, n) { return codes[n] })
   }
-  function table(rows) {
+  function table(rows, ctx) {
     function cells(r) { return r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim() }) }
     var head = cells(rows[0])
     var body = rows.slice(2).map(cells)
-    return '<div class="tbl"><table><thead><tr>' + head.map(function (c) { return '<th>' + inline(c) + '</th>' }).join('') + '</tr></thead><tbody>' +
-      body.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + inline(c) + '</td>' }).join('') + '</tr>' }).join('') + '</tbody></table></div>'
+    return '<div class="tbl"><table><thead><tr>' + head.map(function (c) { return '<th>' + inline(c, ctx) + '</th>' }).join('') + '</tr></thead><tbody>' +
+      body.map(function (r) { return '<tr>' + r.map(function (c) { return '<td>' + inline(c, ctx) + '</td>' }).join('') + '</tr>' }).join('') + '</tbody></table></div>'
   }
-  function list(lines) {
+  function list(lines, ctx) {
     var html = '', stack = []
     lines.forEach(function (line) {
       var m = LI.exec(line)
-      if (!m) { html += '<br>' + inline(line.trim()); return }
+      if (!m) { html += '<br>' + inline(line.trim(), ctx); return }
       var ind = m[1].replace(/\t/g, '    ').length, tag = /\d/.test(m[2]) ? 'ol' : 'ul', text = m[3]
       while (stack.length && ind < stack[stack.length - 1].ind) html += '</li></' + stack.pop().tag + '>'
       var top = stack[stack.length - 1]
       if (!top || ind > top.ind) { html += '<' + tag + '><li>'; stack.push({ ind: ind, tag: tag }) } else html += '</li><li>'
       var ck = /^\[( |x|X)\]\s+/.exec(text)
       if (ck) { html += '<span class="ck">' + (ck[1] === ' ' ? '☐' : '☑') + '</span> '; text = text.slice(ck[0].length) }
-      html += inline(text)
+      html += inline(text, ctx)
     })
     while (stack.length) html += '</li></' + stack.pop().tag + '>'
     return html
   }
-  function md(src) {
+  function md(src, ctx) {
     var L = String(src || '').replace(/\r\n?/g, '\n').split('\n'), out = '', para = [], i = 0, m
-    function flush() { if (para.length) { out += '<p>' + para.map(inline).join('<br>') + '</p>'; para = [] } }
+    function flush() { if (para.length) { out += '<p>' + para.map(function (line) { return inline(line, ctx) }).join('<br>') + '</p>'; para = [] } }
     while (i < L.length) {
       var l = L[i]
       if ((m = /^\s*(`{3,}|~{3,})\s*([^\s`]*)/.exec(l))) {
@@ -160,23 +189,23 @@
         flush()
         var rows = []
         while (i < L.length && /^\s*\|.*\|\s*$/.test(L[i])) rows.push(L[i++])
-        out += table(rows)
+        out += table(rows, ctx)
         continue
       }
-      if ((m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(l))) { flush(); var n = Math.min(5, m[1].length + 2); out += '<h' + n + '>' + inline(m[2]) + '</h' + n + '>'; i++; continue }
+      if ((m = /^(#{1,6})\s+(.+?)\s*#*\s*$/.exec(l))) { flush(); var n = Math.min(5, m[1].length + 2); out += '<h' + n + '>' + inline(m[2], ctx) + '</h' + n + '>'; i++; continue }
       if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(l)) { flush(); out += '<hr>'; i++; continue }
       if (/^\s*>/.test(l)) {
         flush()
         var q = []
         while (i < L.length && /^\s*>/.test(L[i])) q.push(L[i++].replace(/^\s*>\s?/, ''))
-        out += '<blockquote>' + md(q.join('\n')) + '</blockquote>'
+        out += '<blockquote>' + md(q.join('\n'), ctx) + '</blockquote>'
         continue
       }
       if (LI.test(l)) {
         flush()
         var items = []
         while (i < L.length && (LI.test(L[i]) || (items.length && /^\s{2,}\S/.test(L[i])))) items.push(L[i++])
-        out += list(items)
+        out += list(items, ctx)
         continue
       }
       para.push(l)
@@ -229,7 +258,7 @@
 
   function chatState(id) {
     return { id: id, items: [], pending: [], partial: null, lastSeq: -1, firstSeq: -1, hasMore: false, loaded: false, loading: false, err: false,
-      buf: [], open: new Set(), todos: null, todoOpen: false, queue: [], title: '', w: null, model: null, models: null }
+      buf: [], open: new Set(), processOpen: new Set(), todos: null, todoOpen: false, queue: [], title: '', w: null, model: null, models: null }
   }
   // Auto titles occasionally arrive as Markdown ("**Session Title:** x").
   function cleanTitle(t) { return String(t || '').replace(/\*\*|__|`/g, '').replace(/^\s*(session\s*)?title\s*[:：]\s*/i, '').trim() }
@@ -519,6 +548,7 @@
     el.fv.hidden = false
     requestAnimationFrame(function () { requestAnimationFrame(function () { el.fv.classList.add('on') }) })
     pushOverlay('fv', function () {
+      el.fvBody.querySelectorAll('video,audio').forEach(function (m) { m.pause() })
       fv.pop()
       if (fv.length) { fvShow(); return }
       el.fv.classList.remove('on')
@@ -538,6 +568,11 @@
       ? '/m/api/call?s=' + enc(en.s) + '&id=' + enc(en.id) + '&seq=' + en.seq + (en.rseq ? '&rseq=' + en.rseq : '')
       : '/m/api/fs?s=' + enc(en.s) + '&path=' + enc(en.path || '')
     get(url).then(function (v) {
+      if (en.folderFor && v.kind !== 'dir') {
+        en.folderFor = false; en.highlight = v.name; en.path = dirName(v.rel); en.title = baseName(en.path) || '工作区'; en.data = null
+        if (fv[fv.length - 1] === en) fvShow()
+        return
+      }
       en.data = v
       if (fv[fv.length - 1] === en) fvPaint(en)
     }, function (e) {
@@ -546,7 +581,7 @@
   }
   // Chips only for files the viewer can open: relative paths, or absolute
   // ones under the session's workspace (the server enforces the same rule).
-  function wsRoot(sid) { var w = wsOf(sid); return w && S.wsById[w] ? S.wsById[w].path : '' }
+  function wsRoot(sid) { var ag = isAgent(sid) && agentOf(sid), w = wsOf(sid); return (ag && ag.cwd) || (w && S.wsById[w] ? S.wsById[w].path : '') }
   function normP(p) { return String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() }
   function inRoot(p, root) {
     if (!/^([a-zA-Z]:[\\/]|[\\/])/.test(p)) return true
@@ -573,7 +608,7 @@
       el.fvSub.textContent = d.rel ? '/' + d.rel : '工作区根目录'
       h += d.entries.length ? '<div class="grp fl">' + d.entries.map(function (x) {
         var media = /\.(png|jpe?g|gif|webp|bmp|svg|ico|avif|mp4|m4v|webm|mov|mp3|m4a|aac|wav|ogg|flac)$/i.test(x.name)
-        return '<button class="row" data-fe="' + esc(x.name) + '" data-dir="' + (x.dir ? 1 : '') + '"><span class="fic' + (x.dir ? ' d' : '') + '">' + ic(x.dir ? 'folder' : media ? 'image' : 'read', 's') + '</span><div class="mid"><div class="t">' + esc(x.name) +
+        return '<button class="row' + (en.highlight === x.name ? ' selected' : '') + '" data-fe="' + esc(x.name) + '" data-dir="' + (x.dir ? 1 : '') + '"><span class="fic' + (x.dir ? ' d' : '') + '">' + ic(x.dir ? 'folder' : media ? 'image' : 'read', 's') + '</span><div class="mid"><div class="t">' + esc(x.name) +
           '</div><div class="m">' + (x.dir ? '文件夹' : fsize(x.size)) + ' · ' + when(x.at) + '</div></div>' + (x.dir ? ic('chev', 's') : '') + '</button>'
       }).join('') + '</div>' : '<div class="empty"><b>空文件夹</b></div>'
       if (d.more) h += '<div class="fvnote">文件太多，只列出前 500 个</div>'
@@ -597,6 +632,11 @@
       }
     }
     el.fvBody.innerHTML = h
+    if (en.autoplay) {
+      en.autoplay = false
+      var movie = el.fvBody.querySelector('video')
+      if (movie) movie.play().catch(function () {})
+    }
   }
 
   // Line diff for the edit card: LCS over lines, unchanged runs folded to 3
@@ -661,6 +701,12 @@
       c.hasMore = v.hasMore
       if (v.todos) c.todos = v.todos
       if (v.title) setTitle(c.id, v.title)
+      pruneQueue(c)
+      // The history page carries the session's own run flag, so a `run` frame
+      // missed while the stream was down corrects itself on every load. Only
+      // the response's own value is used: falsy includes undefined, and
+      // trusting that would clear a run the phone had just observed locally.
+      if (typeof v.run === 'boolean') setRun(c.id, v.run)
       c.loaded = true
     }, function (e) {
       c.err = true
@@ -725,6 +771,9 @@
         setStatus('online')
         S.asks.clear()
         S.qs.clear()
+        // The host only sends nonempty queue baselines on reconnect.
+        S.chats.forEach(function (c) { c.queue = [] })
+        drawDock()
         if (S.hellos > 1) resync()
         loadAgents()
         scheduleHome()
@@ -737,6 +786,14 @@
       case 'askDone': { var a = S.asks.get(f.id); S.asks.delete(f.id); return onPending((a && a.s) || f.s) }
       case 'q': S.qs.set(f.rpc, f); buzz(30); return onPending(f.s)
       case 'qDone': { var q = S.qs.get(f.rpc); S.qs.delete(f.rpc); return onPending((q && q.s) || f.s) }
+      case 'queue': {
+        // Inbox snapshots are independent of history loading and can arrive
+        // for a conversation before it has ever been opened on this phone.
+        var queuedChat = S.chats.get(f.s)
+        if (!queuedChat) { queuedChat = chatState(f.s); S.chats.set(f.s, queuedChat) }
+        apply(queuedChat, f)
+        return
+      }
       case 'agentErr': if (f.s === S.cur) toast(f.msg || '运行出错', 'err'); return
       case 'err': return
     }
@@ -785,6 +842,7 @@
         }
         if (it.k === 'end') { c.partial = null; touch(c.id) }
         c.items.push(it)
+        pruneQueue(c)
         draw(c)
         return
       }
@@ -803,7 +861,7 @@
         return
       }
       case 'todo': c.todos = f.todos; if (c.id === S.cur) drawDock(); return
-      case 'queue': c.queue = f.items || []; if (c.id === S.cur) drawDock(); return
+      case 'queue': c.queue = f.items || []; pruneQueue(c); if (c.id === S.cur) drawDock(); return
     }
   }
   function resync() {
@@ -851,17 +909,40 @@
     }).join('')
     return '<div class="u' + (it.pending ? ' pending' : '') + '">' + (imgs ? '<div class="imgs">' + imgs + '</div>' : '') + (it.text ? '<div class="bub">' + esc(it.text) + '</div>' : '') + '</div>'
   }
-  function asstHtml(it) {
+  function asstHtml(it, c, resultOnly) {
     var h = '<div class="a">'
-    if (it.think) {
+    if (it.think && !resultOnly) {
       h += '<button class="think" data-think="' + it.seq + '">' + ic('bulb', 's') + '思考过程' + ic(it._t ? 'down' : 'chev', 's') + '</button>'
       if (it._t) h += '<div class="think-body">' + esc(it.think) + '</div>'
     }
     if (it.text) {
-      h += '<div class="md">' + (it._h || (it._h = md(it.text))) + '</div>'
+      var root = wsRoot(c.id)
+      if (!it._h || it._root !== root) {
+        var ctx = { root: root, paths: [] }
+        it._h = md(it.text, ctx); it._paths = ctx.paths; it._root = root
+      }
+      h += '<div class="md">' + it._h + '</div>'
+      if (resultOnly) h += (it._paths || []).filter(videoPath).map(function (p) {
+        return '<div class="artifact"><div class="artifact-head"><b>' + esc(baseName(p)) + '</b><button data-result-path="' + esc(p) + '">' + ic('folder', 's') + '所在文件夹</button></div>' +
+          '<video class="artifact-video" data-artifact="' + esc(p) + '" aria-label="播放 ' + esc(baseName(p)) + '" controls playsinline preload="none" src="' + esc(rawUrl(c.id, p)) + '"></video><div class="artifact-note" hidden></div></div>'
+      }).join('')
       if (it._fin) h += '<div class="acts"><button data-copymsg="' + it.seq + '">' + ic('copy', 's') + '复制</button></div>'
     }
     return h + '</div>'
+  }
+  function processHtml(c, items, final, running) {
+    var detail = items.filter(function (it) { return it !== final && (it.k === 't' || it.k === 'a') })
+    if (final && final.think) detail.push({ k: 'a', seq: final.seq, think: final.think, _t: final._t })
+    if (!detail.length) return ''
+    var key = items[0].seq, opened = c.processOpen && c.processOpen.has(key), h = ''
+    if (opened) {
+      var group = []
+      function flush() { if (group.length) { h += toolsHtml(c, group); group = [] } }
+      detail.forEach(function (it) { if (it.k === 't') group.push(it); else { flush(); h += asstHtml(it, c, false) } })
+      flush()
+    }
+    return '<div class="process' + (opened ? ' o' : '') + '"><button class="process-toggle" data-process="' + key + '" aria-expanded="' + Boolean(opened) + '">' +
+      (running ? '<span class="spin s"></span>' : ic('checkc', 's')) + '<span>' + (opened ? '收起过程' : '查看过程') + '</span>' + ic('chev', 's') + '</button>' + (opened ? '<div class="process-body">' + h + '</div>' : '') + '</div>'
   }
   function toolRow(t) {
     var st = t.err ? ic('xc', 's st bad') : t.done ? ic('checkc', 's st') : t._spin ? '<span class="spin s"></span>' : ''
@@ -908,27 +989,35 @@
     var running = isRunning(c.id), lastEnd = -1
     c.items.forEach(function (it, i) { if (it.k === 'end') lastEnd = i })
     c.items.forEach(function (it, i) { if (it.k === 't') it._spin = running && !it.done && i > lastEnd })
-    // Copy action only under each turn's final answer, not every interim note.
-    var lastA = null
+    // One expandable process per turn. The last text answer is the result;
+    // live commentary and tool output never create a wall above it.
+    var h = '', turn = []
+    function flush(done) {
+      if (!turn.length) return
+      var final = null, end = null
+      turn.forEach(function (it) { if (it.k === 'a') { it._fin = false; if (it.text) final = it } else if (it.k === 'end') end = it })
+      if (!done) final = null
+      if (final) final._fin = true
+      h += processHtml(c, turn, final, !done)
+      if (final) h += asstHtml(final, c, true)
+      if (end) h += endHtml(end)
+      turn = []
+    }
     c.items.forEach(function (it) {
-      if (it.k === 'a') { if (lastA) lastA._fin = false; lastA = it; it._fin = false }
-      else if (it.k === 'end' || it.k === 'u') { if (lastA) lastA._fin = true; lastA = null }
+      if (it.k === 'u') { flush(true); h += userHtml(c, it) }
+      else { turn.push(it); if (it.k === 'end') flush(true) }
     })
-    if (lastA) lastA._fin = !running
-    var h = '', group = []
-    function flush() { if (group.length) { h += toolsHtml(c, group); group = [] } }
-    c.items.forEach(function (it) {
-      if (it.k === 't') { group.push(it); return }
-      flush()
-      if (it.k === 'u') h += userHtml(c, it)
-      else if (it.k === 'a') h += asstHtml(it)
-      else if (it.k === 'end') h += endHtml(it)
-    })
-    flush()
+    flush(!running)
     c.pending.forEach(function (p) { h += userHtml(c, p) })
     if (!h && isAgent(c.id)) { var ag = agentOf(c.id); h = '<div class="hint"><b>' + esc(ag ? ag.project || ag.name : '外部会话') + '</b>这个会话的记录会出现在这里，也可以从手机继续它</div>' }
     if (!h) h = '<div class="hint"><b>' + esc(wsTitle(wsOf(c.id))) + '</b>发一条消息开始</div>'
+    var playing = Array.prototype.filter.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return !v.paused || v.currentTime > 0 })
     el.msgs.innerHTML = h
+    el.msgs.querySelectorAll('video[data-artifact]').forEach(function (v) {
+      var previous = playing.find(function (old) { return old.getAttribute('src') === v.getAttribute('src') && old.getAttribute('data-artifact') === v.getAttribute('data-artifact') })
+      if (previous) { v.parentNode.replaceChild(previous, v); v = previous }
+      v.onerror = function () { var note = v.parentNode.querySelector('.artifact-note'); note.hidden = false; note.textContent = '视频暂不能播放，可打开所在文件夹查看文件。' }
+    })
     drawTail(c)
     if (stick) toBottom()
     el.toBottom.hidden = nearBottom()
@@ -939,10 +1028,9 @@
   }
   function drawTail(c) {
     var p = c.partial, h = ''
-    if (p && p.text) h = '<div class="a"><div class="md">' + withCursor(md(p.text)) + '</div></div>'
-    else if (p && p.tool) h = '<div class="typing"><span class="spin s"></span>正在' + esc(toolLabel(p.tool)) + '…</div>'
+    if (p && p.tool) h = '<div class="typing"><span class="spin s"></span>正在' + esc(toolLabel(p.tool)) + '…</div>'
     else if (p && p.think) h = '<div class="typing"><span class="dots"><i></i><i></i><i></i></span>思考中</div>'
-    else if (isRunning(c.id) && c.loaded && !lastToolSpinning(c)) h = '<div class="typing"><span class="dots"><i></i><i></i><i></i></span></div>'
+    else if (isRunning(c.id) && c.loaded) h = '<div class="typing"><span class="spin s"></span>运行中…</div>'
     el.tail.innerHTML = h
   }
 
@@ -989,6 +1077,22 @@
     }).join('') + '</div>'
   }
   var dockDirty = false
+  // A queued message leaves the inbox as soon as DSH delivers it into the
+  // session. When it lands while the phone's stream is down, the queue frame
+  // that removed it is gone and the dock would keep a phantom "排队中" row
+  // forever (seen 2026-10-04: the message had been answered, the row did not
+  // clear). Match the host message id, not source.rpcId: those are different
+  // UUIDs. rpcId remains the correlation key for local "sending" bubbles.
+  function pruneQueue(c) {
+    if (!c.queue || !c.queue.length) return
+    var sent = {}
+    c.items.forEach(function (it) { if (it.k === 'u' && it.messageId) sent[it.messageId] = true })
+    var kept = c.queue.filter(function (x) { return !x.id || !sent[x.id] })
+    if (kept.length !== c.queue.length) {
+      c.queue = kept
+      if (c.id === S.cur) drawDock()
+    }
+  }
   function drawDock() {
     var c = S.cur && S.chats.get(S.cur)
     if (!c) { el.dock.innerHTML = ''; return }
@@ -1001,8 +1105,18 @@
     S.asks.forEach(function (a) { if (a.s === c.id) h += askHtml(c, a) })
     S.qs.forEach(function (q) { if (q.s === c.id) h += qHtml(q) })
     ;(c.queue || []).forEach(function (x) {
-      h += '<div class="qitem">' + ic('send', 's') + '<span>' + esc(x.text || '图片') + '</span><em>' + (x.place === 'steering' ? '插入中' : '排队中') + '</em><button data-unqueue="' + esc(x.id) + '" aria-label="撤回">' + ic('x', 's') + '</button></div>'
+      var busy = c.queueBusy && c.queueBusy[x.id], disabled = busy ? ' disabled' : ''
+      h += '<div class="qitem"><span>' + esc(x.text || '图片') + '</span><em>' + (busy ? '处理中…' : x.place === 'steering' ? '等待接收插话' : '排队中') + '</em>'
+      if (x.id && x.place !== 'steering') h += '<div class="qactions">'
+        + '<button data-qedit="' + esc(x.id) + '" aria-label="编辑消息"' + disabled + '>' + ic('edit', 's') + '编辑</button>'
+        + '<button data-unqueue="' + esc(x.id) + '" aria-label="删除排队消息"' + disabled + '>' + ic('delete', 's') + '删除</button>'
+        + (isRunning(c.id) && x.place !== 'steering' ? '<button data-steer="' + esc(x.id) + '" aria-label="插话发送"' + disabled + '>' + ic('steer', 's') + '插话发送</button>' : '') + '</div>'
+      h += '</div>'
     })
+    // The PC dock's "steer all": every still-pending row, in FIFO order.
+    if (isRunning(c.id) && (c.queue || []).filter(function (x) { return x.id && x.place !== 'steering' }).length > 1) {
+      h += '<div class="qitem qall"><span>把排队的都插进去</span><button data-steerall="1" aria-label="全部插队">' + ic('steer', 's') + '</button></div>'
+    }
     if (c.todos && c.todos.length) h += todoHtml(c)
     el.dock.innerHTML = h
   }
@@ -1104,6 +1218,79 @@
       toast('没发出去：' + e.message, 'err')
     })
   }
+  function queueItem(c, id) { return (c.queue || []).find(function (x) { return x.id === id }) }
+  // The host owns the queue. A click is not delivery, and an unavailable
+  // steering window must not hide a message that is still waiting there.
+  function updateQueued(c, itemId, action) {
+    var row = queueItem(c, itemId)
+    if (!row) { toast('这条消息已被接收或删除'); return Promise.resolve(false) }
+    var pending = c.queueBusy || (c.queueBusy = {})
+    if (pending[itemId]) return Promise.resolve(false)
+    pending[itemId] = true
+    if (c.id === S.cur) drawDock()
+    return rpc('session.updateQueue', { sessionId: c.id, itemId: itemId, action: action }).then(function (v) {
+      if (!v || v.accepted !== true) throw new Error('电脑未确认操作，请刷新后核对')
+      var current = queueItem(c, itemId)
+      if (action.kind === 'remove') dismissQueued(c, itemId)
+      else if (current && action.kind === 'steer') current.place = 'steering'
+      else if (current && action.kind === 'edit' && current.editText === row.editText) {
+        current.editText = action.content[0].text
+        current.text = current.editText
+      }
+      toast(action.kind === 'steer' ? '已请求插话，等待当前步骤结束后接收' : action.kind === 'edit' ? '消息已修改' : '排队消息已删除')
+      return true
+    }).catch(function (err) {
+      if (err.code === 'queue-item-not-found') {
+        dismissQueued(c, itemId)
+        toast('这条消息已被接收或删除，请查看对话')
+      } else if (err.code === 'steer-unavailable') toast('当前步骤暂不能插话，消息仍在排队', 'err')
+      else toast('操作未完成：' + err.message + '；请核对队列后再试', 'err')
+      return false
+    }).finally(function () {
+      delete pending[itemId]
+      if (c.id === S.cur) drawDock()
+    })
+  }
+  function steer(c, itemId) {
+    var row = queueItem(c, itemId)
+    if (!row || row.place === 'steering' || !isRunning(c.id)) return Promise.resolve(false)
+    buzz(8)
+    return updateQueued(c, itemId, { kind: 'steer' })
+  }
+  function editQueued(c, itemId) {
+    var row = queueItem(c, itemId)
+    if (!row || (c.queueBusy && c.queueBusy[itemId])) return
+    if (typeof row.editText !== 'string') {
+      toast(row.editText === null ? '含附件的消息暂不能编辑，可删除后重新发送' : '电脑端手机插件需更新后才能安全编辑完整消息', 'err')
+      return
+    }
+    openSheet('<div class="sh-h">编辑排队消息</div><div class="sh-in"><textarea id="qe" class="queue-editor" aria-label="消息内容"></textarea><div class="btns"><button class="btn" data-x>取消</button><button class="btn pri" data-qsave>保存修改</button></div></div>')
+    var inp = document.getElementById('qe'), saving = false, originalText = row.editText
+    var editor = overlays[overlays.length - 1]
+    inp.value = originalText
+    setTimeout(function () { inp.focus() }, 360)
+    el.sheet.onclick = function (e) {
+      if (e.target.closest('[data-x]')) { if (!saving) closeOverlay(); return }
+      var button = e.target.closest('[data-qsave]')
+      if (!button || saving) return
+      if (!inp.value.trim()) { toast('消息不能为空', 'err'); return }
+      var current = queueItem(c, itemId)
+      if (!current || current.editText !== originalText) { toast('消息已在电脑端变化，请重新打开编辑', 'err'); return }
+      saving = true; button.disabled = true
+      updateQueued(c, itemId, { kind: 'edit', content: [{ type: 'text', text: inp.value }] }).then(function (ok) {
+        saving = false; button.disabled = false
+        if (ok && overlays[overlays.length - 1] === editor) closeOverlay()
+      })
+    }
+  }
+  // The queue/run frames that would retire this row may be the ones we missed.
+  function dismissQueued(c, itemId) {
+    var kept = (c.queue || []).filter(function (x) { return x.id !== itemId })
+    if (kept.length !== (c.queue || []).length) {
+      c.queue = kept
+      if (c.id === S.cur) drawDock()
+    }
+  }
   function stop() {
     var id = S.cur
     buzz(12)
@@ -1200,12 +1387,14 @@
       '<button class="opt-row" data-a="model"><span class="ico">' + ic('cpu', 's') + '</span><span class="mid"><b>切换模型</b><small>' + esc(modelName(c) || '当前模型') + '</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="files"><span class="ico">' + ic('folder', 's') + '</span><span class="mid"><b>工作区文件</b><small>' + esc(wsTitle(wsOf(c.id))) + '</small></span>' + ic('chev', 's') + '</button>' +
       '<button class="opt-row" data-a="usage"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>用量</b><small>token、缓存命中、上下文占用、耗时</small></span>' + ic('chev', 's') + '</button>' +
+      '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>更新界面并重连</b><small>保存文字草稿，加载最新界面</small></span></button>' +
       '<button class="opt-row" data-a="rename"><span class="ico">' + ic('pen', 's') + '</span><span class="mid"><b>重命名</b></span></button>' +
       '<button class="opt-row danger" data-a="archive"><span class="ico">' + ic('archive', 's') + '</span><span class="mid"><b>归档对话</b><small>从列表隐藏，记录仍保存在电脑上</small></span></button></div>')
     el.sheet.onclick = function (e) {
       var b = e.target.closest('[data-a]')
       if (!b) return
       var a = b.dataset.a
+      if (a === 'reload') { reloadUi(); return }
       if (a === 'archive' && !b.dataset.sure) { b.dataset.sure = '1'; b.querySelector('b').textContent = '再点一次确认归档'; buzz(); return }
       closeOverlay().then(function () {
         if (a === 'model') modelSheet()
@@ -1413,6 +1602,15 @@
   // Connection sheet: where this client points, reconnect, and (inside the
   // Android shell) switch to another server.
   var IN_APP = /DSHApp\//.test(navigator.userAgent)
+  function reloadUi() {
+    if (S.att.length) { toast('请先发送或移除已添加的图片，再更新界面', 'err'); return }
+    var busy = false
+    S.chats.forEach(function (c) { if (c.queueBusy && Object.keys(c.queueBusy).length) busy = true })
+    if (busy) { toast('消息操作正在处理中，请稍后更新界面', 'err'); return }
+    saveDraft()
+    history.replaceState(history.state, '', location.pathname + (S.cur ? '#' + enc(S.cur) : ''))
+    location.reload()
+  }
 
   // Web Push for the installed web app (iPhone: "Add to Home Screen", iOS
   // 16.4+). The Android app has native notifications and skips all of this.
@@ -1463,7 +1661,7 @@
   }
   el.status.onclick = function () {
     openSheet('<div class="sh-h">连接<small>' + esc(location.host) + '</small></div><div class="sh-b">' +
-      '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>重新连接</b><small>' +
+      '<button class="opt-row" data-a="reload"><span class="ico">' + ic('refresh', 's') + '</span><span class="mid"><b>更新界面并重连</b><small>' +
       ({ online: '当前已连接', connecting: '正在连接…', offline: '电脑暂时连不上' })[S.status] + '</small></span></button>' +
       (IN_APP ? '<button class="opt-row" data-a="server"><span class="ico">' + ic('web', 's') + '</span><span class="mid"><b>切换服务器</b><small>换一台电脑，或换一个访问地址</small></span>' + ic('chev', 's') + '</button>' : '') +
       '<button class="opt-row" data-a="usage"><span class="ico">' + ic('stats', 's') + '</span><span class="mid"><b>最近 7 天用量</b><small>token、缓存命中，用得最多的会话</small></span>' + ic('chev', 's') + '</button>' +
@@ -1499,7 +1697,7 @@
         post('/m/api/push/unsubscribe', { endpoint: sub.endpoint }).catch(function () {}).then(function () { return sub.unsubscribe() }).then(function () { toast('已关闭锁屏提醒'); paintPush() }, function (err) { toast(err.message, 'err') })
         return
       }
-      closeOverlay().then(function () { connect(); loadBoot().catch(function (err) { toast(err.message, 'err') }) })
+      reloadUi()
     }
   }
   document.getElementById('btnSearch').onclick = function () { el.searchBox.hidden = false; el.q.focus() }
@@ -1555,6 +1753,20 @@
   el.scroller.addEventListener('click', function (e) {
     var c = S.chats.get(S.cur), b
     if (!c) return
+    if ((b = e.target.closest('[data-result-path]'))) { fvOpen({ kind: 'path', s: c.id, path: b.dataset.resultPath, folderFor: true, title: '所在文件夹' }); return }
+    if ((b = e.target.closest('[data-open-video]'))) {
+      var movie = Array.prototype.find.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v.getAttribute('data-artifact') === b.dataset.openVideo })
+      if (movie) { movie.scrollIntoView({ block: 'center' }); movie.play().catch(function () { toast('请点视频播放按钮', 'err') }) }
+      else fvOpen({ kind: 'path', s: c.id, path: b.dataset.openVideo, autoplay: true, title: baseName(b.dataset.openVideo) })
+      return
+    }
+    if ((b = e.target.closest('[data-process]'))) {
+      var pk = +b.dataset.process
+      if (!c.processOpen) c.processOpen = new Set()
+      if (c.processOpen.has(pk)) c.processOpen.delete(pk); else c.processOpen.add(pk)
+      renderMsgs(c, false, true)
+      return
+    }
     if ((b = e.target.closest('a[href]'))) { e.preventDefault(); window.open(b.href, '_blank', 'noopener'); return }
     if ((b = e.target.closest('[data-full]'))) {
       for (var n = c.items.length - 1; n >= 0; n--) {
@@ -1630,8 +1842,21 @@
       }
       return
     }
+    if ((b = e.target.closest('[data-steer]'))) {
+      steer(c, b.dataset.steer)
+      return
+    }
+    if ((b = e.target.closest('[data-steerall]'))) {
+      // Same strict-steer operation as the per-row button, FIFO order.
+      // The snapshot can still list a row the host already steered inside a
+      // closing turn; each duplicate is a silent no-op, never an error.
+      var pending = (c.queue || []).filter(function (x) { return x.id && x.place !== 'steering' })
+      pending.reduce(function (p, x) { return p.then(function (ok) { return ok === false ? false : steer(c, x.id) }) }, Promise.resolve(true))
+      return
+    }
+    if ((b = e.target.closest('[data-qedit]'))) { editQueued(c, b.dataset.qedit); return }
     if ((b = e.target.closest('[data-unqueue]'))) {
-      rpc('session.updateQueue', { sessionId: c.id, itemId: b.dataset.unqueue, action: { kind: 'remove' } }).then(function () {}, function (err) { toast(err.message, 'err') })
+      updateQueued(c, b.dataset.unqueue, { kind: 'remove' })
       return
     }
     if (e.target.closest('[data-todo]')) { c.todoOpen = !c.todoOpen; drawDock() }

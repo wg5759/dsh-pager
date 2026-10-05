@@ -37,7 +37,10 @@ test('demo DSH: wire protocol, every tool card, waiting approval and question, s
     mux.onmessage = (m) => frames.push(JSON.parse(m.data))
     await new Promise((r) => { mux.onopen = r })
     await new Promise((r) => setTimeout(r, 200))
-    assert.deepEqual(frames.map((f) => f.payload.type).sort(), ['approval/requested', 'question/requested'])
+    assert.deepEqual(frames.filter((f) => f.payload.type !== 'session/queue').map((f) => f.payload.type).sort(), ['approval/requested', 'question/requested'])
+    const queueBaseline = frames.filter((f) => f.payload.type === 'session/queue').map((f) => f.payload)
+    assert.deepEqual(queueBaseline.map((q) => q.sessionId).sort(), list.map((s) => s.sessionId).sort())
+    assert.ok(queueBaseline.every((q) => q.items.length === 0))
 
     // A prompt streams a whole turn over the mux.
     assert.equal((await call(demo.port, 'session.prompt', { sessionId: first.sessionId, content: [{ type: 'text', text: '再跑一遍测试' }] })).value.started, true)
@@ -54,6 +57,99 @@ test('demo DSH: wire protocol, every tool card, waiting approval and question, s
     assert.deepEqual(files.map((f) => f.src).sort(), ['claude', 'codex'])
     assert.equal(foldFile(files.find((f) => f.src === 'claude').file, 'claude').title, '购物车迁到 Pinia')
   } finally {
+    demo.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('demo queue: edit, remove, steer, attachment protection and reconnect snapshots', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshp-queue-'))
+  const demo = await startDemo({ root: path.join(root, 'd') })
+  let mux
+  const queues = new Map()
+  const connectMux = async () => {
+    mux = new WebSocket(`ws://127.0.0.1:${demo.port}/api/events.mux`)
+    mux.onmessage = (m) => {
+      const f = JSON.parse(m.data).payload
+      if (f.type === 'session/queue') queues.set(f.sessionId, f.items)
+    }
+    await new Promise((resolve, reject) => { mux.onopen = resolve; mux.onerror = reject })
+  }
+  const reconnectMux = async () => {
+    await new Promise((resolve) => { mux.onclose = resolve; mux.close() })
+    queues.clear()
+    await connectMux()
+  }
+  const waitQueue = async (sessionId, ready) => {
+    const until = Date.now() + 2000
+    while ((!queues.has(sessionId) || !ready(queues.get(sessionId))) && Date.now() < until) await new Promise((r) => setTimeout(r, 10))
+    const items = queues.get(sessionId) || []
+    assert.ok(queues.has(sessionId) && ready(items), 'expected queue broadcast')
+    return items
+  }
+  try {
+    await connectMux()
+    // Waiting demo turns keep the queue stable without starting a real model or timed reply.
+    const [session, attachmentSession] = (await call(demo.port, 'session.list')).value.items.filter((s) => s.running)
+    const sessionId = session.sessionId
+    const prompt = (content, id = sessionId) => call(demo.port, 'session.prompt', { sessionId: id, content })
+    const update = (itemId, action, id = sessionId) => call(demo.port, 'session.updateQueue', { sessionId: id, itemId, action })
+    await prompt([{ type: 'text', text: '原始内容' }])
+    await prompt([{ type: 'text', text: '保留下一条' }])
+    const [first, second] = await waitQueue(sessionId, (q) => q.length === 2)
+    assert.equal(first.placement, 'queued')
+
+    const edited = [{ type: 'text', text: '修改后第一行' }, { type: 'text', text: '第二行' }]
+    assert.deepEqual((await update(first.id, { kind: 'edit', content: edited })).value, { accepted: true })
+    const afterEdit = await waitQueue(sessionId, (q) => q[0]?.text === '修改后第一行\n第二行')
+    assert.deepEqual(afterEdit.map((q) => q.id), [first.id, second.id])
+    assert.deepEqual(afterEdit[0].message.content, edited)
+    assert.deepEqual(afterEdit[1], second)
+
+    const image = { type: 'image', source: { type: 'base64', mediaType: 'image/png', data: 'demo-image' } }
+    assert.equal((await update(first.id, { kind: 'edit', content: [image] })).error.code, 'attachment-error')
+    assert.equal((await update(first.id, { kind: 'unknown' })).error.code, 'bad-request')
+    assert.deepEqual((await update(second.id, { kind: 'remove' })).value, { accepted: true })
+    const afterRemove = await waitQueue(sessionId, (q) => q.length === 1)
+    assert.deepEqual(afterRemove[0], afterEdit[0])
+    assert.equal((await update(second.id, { kind: 'remove' })).error.code, 'queue-item-not-found')
+
+    assert.deepEqual((await update(first.id, { kind: 'steer' })).value, { accepted: true })
+    const afterSteer = await waitQueue(sessionId, (q) => q[0]?.placement === 'steering')
+    assert.equal(afterSteer[0].id, first.id)
+    assert.deepEqual(afterSteer[0].message.content, edited)
+    assert.equal((await update(first.id, { kind: 'steer' })).error.code, 'steer-unavailable')
+    assert.equal((await update('already-consumed', { kind: 'steer' })).error.code, 'queue-item-not-found')
+
+    await prompt([{ type: 'text', text: '等待下一轮' }])
+    const pending = (await waitQueue(sessionId, (q) => q.length === 2))[1]
+    const beforeRefresh = queues.get(sessionId)
+    await reconnectMux()
+    const restored = await waitQueue(sessionId, (q) => q.length === 2)
+    assert.deepEqual(restored, beforeRefresh)
+    assert.deepEqual(restored.map((q) => q.placement), ['steering', 'queued'])
+    await call(demo.port, 'session.cancel', { sessionId })
+    assert.equal((await call(demo.port, 'session.list')).value.items.find((s) => s.sessionId === sessionId).running, false)
+    assert.equal((await update(pending.id, { kind: 'steer' })).error.code, 'steer-unavailable')
+    assert.deepEqual((await update(first.id, { kind: 'remove' })).value, { accepted: true })
+    assert.deepEqual((await update(pending.id, { kind: 'remove' })).value, { accepted: true })
+    await waitQueue(sessionId, (q) => q.length === 0)
+
+    const attachedContent = [{ type: 'text', text: '带图排队' }, image]
+    await prompt(attachedContent, attachmentSession.sessionId)
+    const [attached] = await waitQueue(attachmentSession.sessionId, (q) => q.length === 1)
+    assert.deepEqual(attached.message.content, attachedContent)
+    assert.equal((await update(attached.id, { kind: 'edit', content: edited }, attachmentSession.sessionId)).error.code, 'attachment-error')
+    assert.deepEqual((await update(attached.id, { kind: 'steer' }, attachmentSession.sessionId)).value, { accepted: true })
+    const intact = await waitQueue(attachmentSession.sessionId, (q) => q[0]?.placement === 'steering')
+    assert.deepEqual(intact[0].message.content, attachedContent)
+    assert.deepEqual((await update(attached.id, { kind: 'remove' }, attachmentSession.sessionId)).value, { accepted: true })
+    await waitQueue(attachmentSession.sessionId, (q) => q.length === 0)
+    await reconnectMux()
+    assert.deepEqual(await waitQueue(sessionId, (q) => q.length === 0), [])
+    assert.deepEqual(await waitQueue(attachmentSession.sessionId, (q) => q.length === 0), [])
+  } finally {
+    mux?.close()
     demo.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -88,6 +184,31 @@ test('the plugin over the demo DSH: boot, quick commands, usage', async () => {
 
     // Usage comes from DSH's per-session projections; boot only carries context pressure from 50%.
     const boot = (await (await fetch(B + '/m/api/boot')).json()).value
+    // Real DSH history omits running. Status reconciliation must read list,
+    // as this fake host does, rather than inventing a history field.
+    for (const s of boot.sessions) {
+      const h = (await (await fetch(B + '/m/api/history?s=' + encodeURIComponent(s.id) + '&n=1')).json()).value
+      assert.equal(h.run, s.run, s.title)
+      for (const end of h.items.filter(it => it.k === 'end')) assert.equal(end.st, s.run)
+    }
+    // Native video players request byte ranges and HEAD through the same
+    // authenticated workspace route used by inline result videos.
+    const video = Buffer.from(Array.from({ length: 128 }, (_, i) => i))
+    const output = path.join(boot.workspaces[0].path, '成片 01.mp4')
+    fs.writeFileSync(output, video)
+    const sid = boot.sessions.find(s => s.w === boot.workspaces[0].id).id
+    const raw = B + '/m/api/raw?s=' + encodeURIComponent(sid) + '&path=' + encodeURIComponent('成片 01.mp4')
+    const ranged = await fetch(raw, { headers: { range: 'bytes=12-23' } })
+    assert.equal(ranged.status, 206)
+    assert.equal(ranged.headers.get('content-type'), 'video/mp4')
+    assert.equal(ranged.headers.get('content-range'), 'bytes 12-23/128')
+    assert.deepEqual(Buffer.from(await ranged.arrayBuffer()), video.subarray(12, 24))
+    const head = await fetch(raw, { method: 'HEAD' })
+    assert.equal(head.headers.get('content-length'), '128')
+    assert.equal((await head.arrayBuffer()).byteLength, 0)
+    assert.equal((await fetch(raw, { headers: { range: 'bytes=200-' } })).status, 416)
+    const denied = await fetch(B + '/m/api/raw?s=' + encodeURIComponent(sid) + '&path=' + encodeURIComponent('../outside.mp4'))
+    assert.ok([403, 404].includes(denied.status))
     const rss = boot.sessions.find((x) => x.title.startsWith('RSS'))
     assert.equal(rss.cx, 74)
     assert.equal(boot.sessions.find((x) => x.title.startsWith('首页')).cx, undefined)

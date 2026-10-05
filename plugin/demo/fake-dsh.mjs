@@ -231,13 +231,13 @@ export async function startDemo({ root, port = 0, log = () => {} }) {
     'session.prompt': ({ sessionId, content }, rpcId) => {
       const s = own(sessionId)
       const text = (Array.isArray(content) ? content : []).filter((b) => b && b.type === 'text').map((b) => b.text).join('\n').trim()
-      if (!text) throw Object.assign(new Error('empty message'), { code: 'bad-request' })
+      if (!text && !(Array.isArray(content) && content.some((b) => b && b.type === 'image'))) throw Object.assign(new Error('empty message'), { code: 'bad-request' })
       if (!s.title) {
         s.title = text.split('\n')[0].slice(0, 24)
         setTimeout(() => toMux({ type: 'session/projection', sessionId: s.id, key: 'title', value: s.title }), 1200)
       }
       if (s.running) {
-        s.queue.push({ id: 'q-' + crypto.randomBytes(3).toString('hex'), placement: 'next', message: { content: [{ type: 'text', text }] }, text, rpcId })
+        s.queue.push({ id: 'q-' + crypto.randomBytes(3).toString('hex'), placement: 'queued', message: { content }, text, rpcId })
         toMux({ type: 'session/queue', sessionId: s.id, items: s.queue })
         return { queued: true }
       }
@@ -245,11 +245,25 @@ export async function startDemo({ root, port = 0, log = () => {} }) {
       return { started: true }
     },
     'session.cancel': ({ sessionId }) => { cancel(own(sessionId)); return {} },
-    'session.updateQueue': ({ sessionId, itemId }) => {
+    'session.updateQueue': ({ sessionId, itemId, action }) => {
       const s = own(sessionId)
-      s.queue = s.queue.filter((q) => q.id !== itemId)
+      if (!['edit', 'remove', 'steer'].includes(action?.kind)) throw Object.assign(new Error('invalid queue action'), { code: 'bad-request' })
+      const item = s.queue.find((q) => q.id === itemId)
+      if (!item) throw Object.assign(new Error('queued item is no longer pending'), { code: 'queue-item-not-found' })
+      if (action.kind === 'edit') {
+        if (!Array.isArray(action.content) || !action.content.every((b) => b && b.type === 'text' && typeof b.text === 'string') || !item.message.content.every((b) => b && b.type === 'text')) {
+          throw Object.assign(new Error('queue edits accept text-only messages and content'), { code: 'attachment-error' })
+        }
+        item.message = { ...item.message, content: action.content }
+        item.text = action.content.map((b) => b.text).join('\n').trim()
+      } else if (action.kind === 'steer') {
+        if (!s.running || item.placement !== 'queued') throw Object.assign(new Error('current turn no longer accepts steering'), { code: 'steer-unavailable' })
+        item.placement = 'steering'
+      } else {
+        s.queue = s.queue.filter((q) => q.id !== itemId)
+      }
       toMux({ type: 'session/queue', sessionId: s.id, items: s.queue })
-      return {}
+      return { accepted: true }
     },
     'session.models': ({ sessionId }) => ({
       groups: [{ id: 'deepseek', name: 'DeepSeek', models: [
@@ -317,8 +331,11 @@ export async function startDemo({ root, port = 0, log = () => {} }) {
     const peer = acceptSocket(req, socket, (p) => set.delete(p))
     if (!peer) return
     set.add(peer)
-    // Like DSH: a new mux connection gets every approval and question still waiting.
-    if (set === mux) for (const [rpcId, p] of pending) peer.send({ type: 'server-request', rpcId, payload: p.payload })
+    // Reconnects receive current inbox state as well as approvals and questions still waiting.
+    if (set === mux) {
+      for (const s of S.values()) peer.send({ type: 'server-request', rpcId: crypto.randomUUID(), payload: { type: 'session/queue', sessionId: s.id, items: s.queue } })
+      for (const [rpcId, p] of pending) peer.send({ type: 'server-request', rpcId, payload: p.payload })
+    }
   })
   await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
 

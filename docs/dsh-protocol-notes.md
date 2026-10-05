@@ -119,3 +119,11 @@ export function apply(ctx, config) {
 ```
 
 本地插件的装法：在 profile 的 `node_modules` 下放一个目录（或目录联接），然后在 `cordis.patch.yml` 里 `- insert: [{ id, name }]`，重启 DSH。
+
+## 排队消息与成片查看
+
+`session.updateQueue {sessionId,itemId,action}`：action 为 `{kind:'remove'}`、`{kind:'steer'}` 或 `{kind:'edit',content:[{type:'text',text}]}`，成功值为 `{accepted:true}`。edit 替换完整内容，只允许纯文本；steer 仅用于运行中的可插话队列。请求的 `source.rpcId` 与队列的 `message.id` 是两个不同 ID。
+
+`events.mux` 的 `session/queue` 是完整队列快照，初连只重放非空队列。手机重连时先清旧队列，快照处理独立于历史加载。网络结果不明不自动重试操作。
+
+结果视频沿用 `/m/api/raw?s=&path=`：限会话工作区内文件，支持 HEAD、Range/206 和无效范围 416。最终回复的本地路径会生成视频播放器或所在文件夹入口；文件仍通过已有登录网关/组网通道传输，设备无需 USB 连接。

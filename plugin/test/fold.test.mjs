@@ -125,6 +125,7 @@ test('harness-injected user/message context is hidden; human prompt kept with rp
   assert.equal(f.items.length, 1)
   assert.equal(f.items[0].text, '真的问题')
   assert.equal(f.items[0].rid, 'r-1')
+  assert.equal(f.items[0].messageId, 'b')
 })
 
 test('user images are referenced, not inlined', () => {
@@ -147,7 +148,24 @@ test('queue hides model-only context items', () => {
     { id: 'a', placement: 'queued', message: { content: [{ type: 'text', text: '下一条' }] } },
     { id: 'b', placement: 'context', message: { content: [{ type: 'text', text: 'hidden' }] } },
   ])
-  assert.deepEqual(q, [{ id: 'a', place: 'queued', text: '下一条' }])
+  assert.deepEqual(q, [{ id: 'a', place: 'queued', text: '下一条', editText: '下一条' }])
+})
+
+test('queue edits preserve full text and exclude non-text content', () => {
+  const full = 'x'.repeat(500) + '尾部'
+  const q = foldQueue([
+    { id: 'long', placement: 'queued', message: { content: [{ type: 'text', text: full }] } },
+    { id: 'image', placement: 'queued', message: { content: [{ type: 'text', text: '图' }, { type: 'image', data: 'private-image-data' }] } },
+  ])
+  assert.equal(q[0].editText, full)
+  assert.ok(q[0].text.length < full.length)
+  assert.equal(q[1].editText, null)
+  assert.ok(!JSON.stringify(q).includes('private-image-data'))
+})
+
+test('full queue edit text joins blocks exactly as the desktop editor does', () => {
+  const [q] = foldQueue([{ id: 'm', placement: 'queued', message: { content: [{ type: 'text', text: 'partA' }, { type: 'text', text: 'partB' }] } }])
+  assert.equal(q.editText, 'partApartB')
 })
 
 test('result viewer: rows carry file paths, rseq and a "more" flag', () => {

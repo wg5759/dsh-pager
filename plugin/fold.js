@@ -53,7 +53,7 @@ function imagesOf(content) {
 export function foldUser(e) {
   const m = e.data || {}
   if (m.source && m.source.kind !== 'user') return null
-  return { k: 'u', seq: e.seq, time: e.time, rid: m.source && m.source.rpcId, text: textOf(m.content), imgs: imagesOf(m.content) }
+  return { k: 'u', seq: e.seq, time: e.time, rid: m.source && m.source.rpcId, messageId: m.id, text: textOf(m.content), imgs: imagesOf(m.content) }
 }
 
 /** assistant/message: text + trimmed reasoning. Tool-call blocks are rendered from tool/call events. */
@@ -245,7 +245,7 @@ export function applyChunk(p, c) {
  * Fold one history page (entries = [{event, view}] in seq order).
  * @returns items, the unfinalized tail (partial), seq bounds, latest title/todos.
  */
-export function foldHistory(entries) {
+export function foldHistory(entries, run) {
   const items = []
   const calls = new Map()
   let partial = null
@@ -303,6 +303,12 @@ export function foldHistory(entries) {
           k: 'end', seq: e.seq,
           reason: (e.data && e.data.reason && e.data.reason.kind) || 'completed',
           ms: turnStart ? e.time - turnStart : undefined,
+          // Whether that turn finished, or the session is still working (a new
+          // turn started after this one). Stamped on every end item so the
+          // phone can correct a run flag it missed while its stream was down:
+          // without it the composer keeps its stop button and a typed message
+          // has no way out.
+          st: run === undefined ? undefined : Boolean(run),
         })
         turnStart = null
         break
@@ -322,7 +328,14 @@ export function foldHistory(entries) {
 export function foldQueue(items) {
   return (items || [])
     .filter((i) => i && i.placement !== 'context')
-    .map((i) => ({ id: i.id, place: i.placement, text: cut(textOf(i.message && i.message.content), 300) }))
+    .map((i) => {
+      const content = i.message && i.message.content
+      // Editing replaces the host's entire content. Never turn a clipped
+      // preview (or a message with attachments) into a destructive edit.
+      const editText = Array.isArray(content) && content.length > 0 && content.every((b) => b.type === 'text')
+        ? content.map((b) => b.text).join('') : null
+      return { id: i.id, place: i.placement, text: cut(textOf(content), 300), editText }
+    })
 }
 
 /**

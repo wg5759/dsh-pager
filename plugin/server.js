@@ -393,9 +393,17 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     const payload = { sessionId, maxMessages: n }
     if (before !== null && before !== '') payload.beforeSeq = Number(before)
     const v = await value('session.history', payload, 90000)
-    const f = foldHistory(v.events)
+    // history has no running field in DSH 0.1.1-rc.2; only list carries it.
+    // Keep history usable when that separate status read is unavailable.
+    let run
+    try {
+      const sl = await value('session.list', {})
+      const s = sl.items.find((x) => x.sessionId === sessionId)
+      if (s && typeof s.running === 'boolean') run = s.running
+    } catch { log('history: session run state unavailable') }
+    const f = foldHistory(v.events, run)
     const pv = (v.projections && v.projections.values) || {}
-    return { ...f, hasMore: Boolean(v.hasMore), title: f.title || (typeof pv.title === 'string' ? pv.title : undefined) }
+    return { ...f, run, hasMore: Boolean(v.hasMore), title: f.title || (typeof pv.title === 'string' ? pv.title : undefined) }
   }
 
   // ---- app self-update -------------------------------------------------------

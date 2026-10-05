@@ -45,6 +45,9 @@ export function apply(ctx, config) {
     trustedHosts,
     pushDir: (config && config.pushDir) || undefined,
     appApk: (config && config.appApk) || undefined,
+    externalAgents: config && config.externalAgents !== undefined ? config.externalAgents : false,
+    previewDir: config && config.previewDir,
+    ffmpeg: config && config.ffmpeg,
   })
   ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: '/m', handler: mobile.handle }), 'dsh-mobile: /m route')
   ctx.effect(() => () => mobile.close(), 'dsh-mobile: live streams')

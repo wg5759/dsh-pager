@@ -127,3 +127,15 @@ export function apply(ctx, config) {
 `events.mux` 的 `session/queue` 是完整队列快照，初连只重放非空队列。手机重连时先清旧队列，快照处理独立于历史加载。网络结果不明不自动重试操作。
 
 结果视频沿用 `/m/api/raw?s=&path=`：限会话工作区内文件，支持 HEAD、Range/206 和无效范围 416。最终回复的本地路径会生成视频播放器或所在文件夹入口；文件仍通过已有登录网关/组网通道传输，设备无需 USB 连接。
+
+## 常驻流畅播放器
+
+插件固定注册 `/m`，并按 session 所属工作区解析文件，不绑定某条任务或某个目录。`GET /m/api/video?s=&path=` 返回 `{ok:true,value:{state,url,original}}`；state 为 preparing、ready 或 unavailable。ready 的 url 可为原文件（小 MP4）或 `/m/api/raw?s=&path=&quality=preview`；未就绪的预览 raw 返回409。两种 raw 都沿用工作区 confinement、Host/Origin 检查及 Range/HEAD。
+
+FFmpeg 按需生成 H.264/AAC MP4，最长边1280、30帧、限制码率并 faststart。源文件只读；缓存 key 含真实路径、大小、mtime 与编码配方版本。完成文件原子更名，存在的缓存跨进程复用。任务串行、队列上限8；编码失败时界面可播放原画。
+
+插件配置 `ffmpeg` 可指定已安装可执行文件，默认在 PATH 找 `ffmpeg`；`previewDir` 可指定本机缓存位置，默认 `plugin/.cache/video`。不为缓存另开公开端口。
+
+为了让所有工作区的 Agent 一致交付，可在用户全局 `~/.dsh/AGENTS.md` 加入：
+
+> 成片完成后，最终回复给出当前工作区内的真实视频文件路径（Markdown 链接或反引号）。dsh-pager 会生成视频卡片和所在文件夹入口；使用已安装的常驻播放器，不再为常规观看搭建临时插件。最终回复只保留成片链接、数量/时长与必要异常。

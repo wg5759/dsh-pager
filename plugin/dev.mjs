@@ -41,6 +41,7 @@ const mobile = createMobile({
   log: (m) => console.log(`[dsh-pager] ${m}`),
   trustedHosts: TRUSTED_HOSTS,
   pushDir: stateDir,
+  externalAgents: Boolean(demo), // External-agent showcases are synthetic, explicit demo data.
   ...(demo ? { transcripts: demo.transcripts, spawnAgent: demo.spawnAgent } : {}),
 })
 

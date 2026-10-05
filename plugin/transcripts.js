@@ -210,10 +210,25 @@ export function headMeta(file, src, bytes = 128 * 1024) {
  * Recently written session files of both tools, newest first, for sessions the
  * hooks have not told us about (before installing them, or after a restart).
  */
+function codexAuxiliary(file) {
+  let fd
+  try {
+    fd = fs.openSync(file, 'r')
+    const head = Buffer.alloc(Math.min(256 * 1024, fs.fstatSync(fd).size))
+    fs.readSync(fd, head, 0, head.length, 0)
+    const meta = JSON.parse(head.toString('utf8').split('\n', 1)[0])
+    const source = meta.type === 'session_meta' && meta.payload && meta.payload.source
+    return source === 'subagent' || Boolean(source && typeof source === 'object' && source.subagent)
+  } catch { return false } // Unknown formats remain visible; never delete logs.
+  finally { if (fd !== undefined) fs.closeSync(fd) }
+}
+
 export function recentFiles({ days = 7, max = 30, claudeDir = path.join(os.homedir(), '.claude', 'projects'), codexDir = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions') } = {}) {
   const since = Date.now() - days * 864e5
   const out = []
-  const add = (file, src, id) => { try { const st = fs.statSync(file); if (st.mtimeMs >= since && st.size > 0) out.push({ file, src, id, at: st.mtimeMs, size: st.size }) } catch {} }
+  // Filter before the limit: fresh guardian/worker logs must not crowd the
+  // user's main conversations out of the recent list.
+  const add = (file, src, id) => { try { const st = fs.statSync(file); if (st.mtimeMs >= since && st.size > 0 && !(src === 'codex' && codexAuxiliary(file))) out.push({ file, src, id, at: st.mtimeMs, size: st.size }) } catch {} }
   try {
     for (const d of fs.readdirSync(claudeDir)) {
       let names = []

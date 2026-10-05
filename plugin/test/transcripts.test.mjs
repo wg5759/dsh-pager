@@ -88,3 +88,24 @@ test('recentFiles finds both layouts, newest first, within the window', () => {
   assert.deepEqual(r.map((x) => [x.src, x.id]).sort(), [['claude', '11111111-2222-3333-4444-555555555555'], ['codex', '66666666-7777-8888-9999-000000000000']])
   fs.rmSync(dir, { recursive: true, force: true })
 })
+
+test('recentFiles excludes auxiliary Codex sessions before limiting, without removing files', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshp-main-'))
+  try {
+    const now = new Date(), dir = path.join(root, String(now.getFullYear()), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0'))
+    fs.mkdirSync(dir, { recursive: true })
+    const sources = ['cli', { subagent: { other: 'guardian' } }, { subagent: { thread_spawn: { parent_thread_id: 'main' } } }]
+    const files = sources.map((source, i) => {
+      const id = `00000000-0000-4000-8000-00000000000${i}`
+      const file = path.join(dir, `rollout-test-${id}.jsonl`)
+      fs.writeFileSync(file, JSON.stringify({ type: 'session_meta', payload: { source, cwd: 'D:/project' } }) + '\n')
+      const at = Date.now() / 1000 - 30 + i
+      fs.utimesSync(file, at, at)
+      return file
+    })
+    const list = recentFiles({ codexDir: root, claudeDir: path.join(root, 'no-claude'), max: 1 })
+    assert.equal(list.length, 1)
+    assert.equal(list[0].file, files[0], 'newer auxiliary records do not consume the quota')
+    for (const file of files) assert.ok(fs.existsSync(file), 'list filtering keeps original history')
+  } finally { fs.rmSync(root, { recursive: true, force: true }) }
+})

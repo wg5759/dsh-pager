@@ -173,6 +173,19 @@ test('the plugin over the demo DSH: boot, quick commands, usage', async () => {
   const post = (items) => fetch(B + '/m/api/commands', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }) })
   try {
     assert.deepEqual((await (await fetch(B + '/m/api/boot')).json()).value.workspaces.map((w) => w.title), ['shop-web', 'blog'])
+    const external = (await (await fetch(B + '/m/api/agents')).json()).value
+    assert.equal(external.enabled, false)
+    assert.deepEqual(external.sessions, [])
+    assert.deepEqual(external.asks, [])
+    for (const route of ['agents/history?s=agent:codex:fake', 'fs?s=agent:codex:fake&path=README.md', 'raw?s=agent:codex:fake&path=clip.mp4']) {
+      const r = await fetch(B + '/m/api/' + route)
+      assert.equal(r.status, 403)
+      assert.equal((await r.json()).error.code, 'external-agents-disabled')
+    }
+    for (const route of ['agents/prompt', 'agents/mode', 'respond']) {
+      const r = await fetch(B + '/m/api/' + route, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ s: 'agent:codex:fake', text: 'x', mode: 'phone', rpcId: 'agent:fake' }) })
+      assert.equal(r.status, 403)
+    }
     assert.equal((await (await fetch(B + '/m/api/commands')).json()).value.items[0].label, '跑测试')
     const saved = await (await post([{ label: '部署预览', text: '构建并部署到预览环境' }])).json()
     assert.deepEqual(saved.value.items.map((c) => c.label), ['部署预览'])
@@ -196,6 +209,9 @@ test('the plugin over the demo DSH: boot, quick commands, usage', async () => {
     const video = Buffer.from(Array.from({ length: 128 }, (_, i) => i))
     const output = path.join(boot.workspaces[0].path, '成片 01.mp4')
     fs.writeFileSync(output, video)
+    const videoInfo = await (await fetch(B + '/m/api/video?s=' + encodeURIComponent(boot.sessions.find(s => s.w === boot.workspaces[0].id).id) + '&path=' + encodeURIComponent('成片 01.mp4'))).json()
+    assert.equal(videoInfo.value.state, 'ready')
+    assert.ok(videoInfo.value.url.startsWith('/m/api/raw?'))
     const sid = boot.sessions.find(s => s.w === boot.workspaces[0].id).id
     const raw = B + '/m/api/raw?s=' + encodeURIComponent(sid) + '&path=' + encodeURIComponent('成片 01.mp4')
     const ranged = await fetch(raw, { headers: { range: 'bytes=12-23' } })
@@ -219,10 +235,30 @@ test('the plugin over the demo DSH: boot, quick commands, usage', async () => {
     assert.equal(week.totals.sessions, 5)
     assert.equal(week.totals.out, 3200 + 9800 + 900 + 2100 + 600)
     assert.equal(week.sessions[0].title, 'RSS 日期早了 8 小时') // the biggest first
+    // Existing desktop hooks are handed back immediately, never held for a
+    // phone decision when external-agent sharing is off.
+    for (let i = 0; i < 40 && !fs.existsSync(path.join(root, 'state', 'hook.json')); i++) await new Promise(r => setTimeout(r, 100))
+    const token = JSON.parse(fs.readFileSync(path.join(root, 'state', 'hook.json'), 'utf8')).token
+    const response = await fetch(B + '/m/api/agents/hook?src=codex', { method: 'POST', headers: { 'content-type': 'application/json', 'x-pager-token': token }, body: JSON.stringify({ hook_event_name: 'PermissionRequest', session_id: 'external-task', cwd: root }) })
+    assert.deepEqual(await response.json(), {})
   } finally {
     server.close()
     mobile.close()
     demo.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('external-agent sharing requires explicit opt-in', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dshp-optin-'))
+  const demo = await startDemo({ root: path.join(root, 'd') })
+  const mobile = createMobile({ apiPort: () => demo.port, pushDir: path.join(root, 'state'), transcripts: demo.transcripts, externalAgents: true })
+  const server = http.createServer((req, res) => mobile.handle(req, res))
+  await new Promise(r => server.listen(0, '127.0.0.1', r))
+  try {
+    const result = await (await fetch(`http://127.0.0.1:${server.address().port}/m/api/agents`)).json()
+    assert.ok(result.ok, JSON.stringify(result.error))
+    assert.equal(result.value.enabled, true)
+    assert.equal(result.value.sessions.length, 2)
+  } finally { server.close(); mobile.close(); demo.close(); fs.rmSync(root, { recursive: true, force: true }) }
 })

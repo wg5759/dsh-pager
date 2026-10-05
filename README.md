@@ -1,7 +1,7 @@
 # dsh-pager
 
 **DeepSeek Harness 的"寻呼机"**：一个 DSH 插件，加一个约 40 KB 的安卓 App；iPhone 把网页添加到主屏幕即可。
-人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。电脑上的 **Claude Code 和 Codex** 也能一起管（见 [docs/claude-code-codex.md](docs/claude-code-codex.md)）。
+人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。**默认仅同步 DSH 自己的项目和对话**；电脑上的 Claude Code / Codex 接入为显式开启的可选功能（见 [docs/claude-code-codex.md](docs/claude-code-codex.md)）。
 
 > 非官方社区项目，与 DeepSeek 没有关联。· [English](#english)
 
@@ -22,7 +22,7 @@
 <tr><td align="center">看完整改动</td><td align="center">Claude Code 也能管</td><td align="center">深色模式</td></tr>
 </table>
 
-<sub>截图来自演示模式（`node plugin/dev.mjs --demo`），数据全部是虚构的。</sub>
+<sub>截图来自演示模式（`node plugin/dev.mjs --demo`），数据全部是虚构的；演示包含可选的外部 Agent 接入，实际部署默认关闭。</sub>
 
 ---
 
@@ -85,11 +85,12 @@ DSH web（仍只绑 127.0.0.1，不改 DSH 源码）
   - iPhone 走网页推送（iOS 16.4+），内容端到端加密，苹果的推送服务看不到内容。
 - **结果查看器**：在手机上看完整的改动对比（逐行 diff）和命令输出，浏览工作区里的文本、Markdown、图片、视频。只能看该对话所在工作区里的文件；密钥、证书、`.env`、名字带"密码"等的文件不显示，内容里有私钥的文件拒绝打开。
 - **成片直接看**：最终回复里的视频路径会生成对话内播放器；其他文件路径点开所在文件夹并标出对应文件。中文、空格、Markdown 链接及 file URI 均可识别，文件仍限会话工作区。建议成片使用 H.264/AAC MP4，具体播放格式取决于设备的 WebView。
+- **持久的流畅播放**：固定插件支持所有 DSH 工作区，无需为某条任务创建临时播放器。电脑有 FFmpeg 时，大视频默认生成最长边1280、30帧、限码率的预览并缓存；可切换原画。预览与原画都支持按需加载和拖动，源文件保持原样。首次准备完成后会复用缓存，重启不会丢失；未安装 FFmpeg 时使用原画。
 - **结果简洁显示**：每轮中间说明、思考和工具记录收进一个“查看过程”，默认只显示最终结果；运行状态、出错、审批和提问仍能看到。
 - **手机与平板共用更新**：电脑更新插件后，打开首页连接状态，点“更新界面并重连”即可加载新界面；已有旧界面可从最近任务关闭 App 后再打开。无需为界面改动重装 APK。
 
 <img src="docs/img/results.jpg" width="300" alt="演示数据：最终结果、直接播放成片与所在文件夹入口，过程默认折叠">
-- **Claude Code / Codex 也能管**：
+- **Claude Code / Codex 也能管（可选，默认关闭）**：
   - 离开电脑时，它们的确认请求发到手机：电脑锁屏或 3 分钟没人操作就算离开，一回到电脑就交还。
   - 完成时提醒；手机上能看它们的会话记录，也能从手机继续对话。
 - **通知栏就能处理**：
@@ -278,7 +279,8 @@ Together they let you follow sessions, send prompts, and approve or reject tool 
   - Zero npm dependencies.
   - About 2,500 lines of server JS and a vanilla JS UI that hot-reloads on the phone.
   - A 1,300-line Java shell built without Gradle, with in-app updates served from your own PC.
-- **Claude Code and Codex too.** Hooks route their permission prompts to the phone while you are away (screen locked or 3 min idle) and hand them back the moment you touch the PC; you can also read their sessions and continue them from the phone. See [docs/claude-code-codex.md](docs/claude-code-codex.md).
+- **DSH-only by default.** Only DSH projects and sessions are synced. Claude Code and Codex are an optional, explicit opt-in; see [docs/claude-code-codex.md](docs/claude-code-codex.md).
+- **Persistent video previews.** Every DSH workspace can deliver local video paths as inline players. With FFmpeg, large videos get cached H.264/AAC previews (1280 maximum edge, 30 fps, capped bitrate), with an original-quality switch. Both support HTTP Range seeking, and completed previews survive restarts.
 
 Try the UI without DSH: `node plugin/dev.mjs --demo` serves made-up projects and sessions from a fake DSH at http://127.0.0.1:3090/m/ (the screenshots above come from it).
 

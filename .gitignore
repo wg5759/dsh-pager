@@ -11,6 +11,7 @@ android/local.properties
 android/out/
 
 node_modules/
+plugin/.cache/
 *.log
 .DS_Store
 Thumbs.db

@@ -56,6 +56,7 @@ import { fileURLToPath } from 'node:url'
 import { foldHistory, foldUser, foldAssistant, foldCall, foldResult, foldQueue, fullCall, resultCallId, foldUsage } from './fold.js'
 import { NotifyHub } from './notify.js'
 import { confine, describe as describeFile, parseRange, MEDIA } from './files.js'
+import { createVideoPreviews } from './video.js'
 import { WebPush, noticePayload, defaultDir } from './push.js'
 import { spawn } from 'node:child_process'
 import { AgentHub, SOURCES, resolveBins } from './agents.js'
@@ -165,12 +166,14 @@ function readJson(req, limit) {
  *   starts one of them; only the demo (demo/fake-dsh.mjs) replaces the real ones.
  * @returns {{ handle: (req, res) => Promise<void>, close: () => void }}
  */
-export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, transcripts = {}, spawnAgent = spawn }) {
+export function createMobile({ apiPort, servePort = apiPort, log = () => {}, trustedHosts = [], pushDir, appApk, externalAgents = false, previewDir, ffmpeg, transcripts = {}, spawnAgent = spawn }) {
+  if (typeof externalAgents !== 'boolean') throw new Error('externalAgents must be a boolean')
   // Fail the load loudly, as DSH does, rather than 403 every phone request later.
   const badHost = trustedHosts.find((h) => canonicalTrustedHost(h) === null)
   if (badHost !== undefined) throw new Error(`dsh-pager: trustedHosts entry ${JSON.stringify(badHost)} is not a bare host[:port] authority`)
   const bridges = new Set()
   let shell = null
+  const previews = createVideoPreviews({ dir: previewDir || path.join(PLUGIN_DIR, '.cache', 'video'), ffmpeg, log })
 
   const base = () => `http://127.0.0.1:${apiPort()}`
 
@@ -236,6 +239,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     return { key, src, sid, cwd: (live && live.cwd) || (disk && disk.cwd) || '', file: (live && live.transcript) || (disk && disk.file) || '', title: (live && live.title) || (disk && disk.title) || '' }
   }
   function agentSessions() {
+    if (!externalAgents) return []
     const disk = new Map(diskSessions().map((x) => [x.id, x]))
     // A session the hooks only saw ask for permission (e.g. after a restart) has no title yet; its file does.
     const live = agents.list().map((x) => { const d = disk.get(x.id); return d ? { ...x, title: x.title || d.title, cwd: x.cwd || d.cwd, project: x.project || d.project } : x })
@@ -432,6 +436,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   async function rootOf(sessionId) {
     if (!sessionId) throw Object.assign(new Error('missing s'), { status: 400, code: 'bad-request' })
     if (sessionId.startsWith('agent:')) {
+      if (!externalAgents) throw Object.assign(new Error('当前仅同步 DSH 自己的项目'), { status: 403, code: 'external-agents-disabled' })
       const s = agentInfo(sessionId)
       if (!s || !s.cwd) throw Object.assign(new Error('不知道这个会话的项目目录'), { status: 404, code: 'no-workspace' })
       return s.cwd
@@ -467,9 +472,14 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   }
 
   async function raw(url, req, res) {
-    const { real, stat } = await confine(await rootOf(url.searchParams.get('s')), url.searchParams.get('path'))
-    const type = MEDIA[path.extname(real).toLowerCase()]
+    let { real, stat } = await confine(await rootOf(url.searchParams.get('s')), url.searchParams.get('path'))
+    let type = MEDIA[path.extname(real).toLowerCase()]
     if (!stat.isFile() || !type) throw Object.assign(new Error('这种文件不能直接打开'), { status: 415, code: 'unsupported' })
+    if (url.searchParams.get('quality') === 'preview' && type.startsWith('video/')) {
+      const p = previews.request(real, stat)
+      if (p.state !== 'ready') throw Object.assign(new Error('流畅预览正在准备'), { status: 409, code: 'preview-not-ready' })
+      real = p.file; stat = await fs.promises.stat(real); type = 'video/mp4'
+    }
     const headers = {
       'content-type': type, 'accept-ranges': 'bytes', 'cache-control': 'private, no-cache',
       'x-content-type-options': 'nosniff',
@@ -512,6 +522,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
     const isPost = req.method === 'POST'
     if (isPost && !/^application\/json\b/.test(req.headers['content-type'] || '')) return json(req, res, 415, { ok: false, error: { code: 'bad-content-type', message: 'application/json required' } })
     try {
+      if (!externalAgents && route.startsWith('agents/') && route !== 'agents/hook') return json(req, res, 403, { ok: false, error: { code: 'external-agents-disabled', message: '当前仅同步 DSH 自己的项目' } })
       if (route === 'ping' && !isPost) return json(req, res, 200, { ok: true, t: Date.now() })
       if (route === 'boot' && !isPost) return json(req, res, 200, { ok: true, value: await boot() })
       if (route === 'history' && !isPost) return json(req, res, 200, { ok: true, value: await history(url) })
@@ -519,6 +530,13 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       if (route === 'call' && !isPost) return json(req, res, 200, { ok: true, value: await callDetail(url) })
       if (route === 'fs' && !isPost) return json(req, res, 200, { ok: true, value: await describeFile(await rootOf(url.searchParams.get('s')), url.searchParams.get('path')) })
       if (route === 'raw' && !isPost) return await raw(url, req, res)
+      if (route === 'video' && !isPost) {
+        const { real, stat } = await confine(await rootOf(url.searchParams.get('s')), url.searchParams.get('path'))
+        if (!stat.isFile() || !((MEDIA[path.extname(real).toLowerCase()] || '').startsWith('video/'))) throw Object.assign(new Error('不是视频文件'), { status: 415, code: 'unsupported' })
+        const original = '/m/api/raw?' + new URLSearchParams({ s: url.searchParams.get('s'), path: url.searchParams.get('path') })
+        const p = stat.size < 2 * 1024 * 1024 && path.extname(real).toLowerCase() === '.mp4' ? { state: 'ready', original: true } : previews.request(real, stat)
+        return json(req, res, 200, { ok: true, value: { state: p.state, url: original + (p.original ? '' : '&quality=preview'), original } })
+      }
       if (route === 'events' && !isPost) return events(req, res)
       if (route === 'notify' && !isPost) {
         const since = url.searchParams.get('since')
@@ -536,6 +554,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       if (route === 'respond' && isPost) {
         const body = await readJson(req, 1024 * 1024)
         if (typeof body.rpcId === 'string' && body.rpcId.startsWith('agent:')) {
+          if (!externalAgents) return json(req, res, 403, { ok: false, error: { code: 'external-agents-disabled', message: '外部 Agent 不接入多端' } })
           const v = (body.result && body.result.value) || {}
           return json(req, res, 200, { ok: true, value: agents.decide(v.approvalId || body.rpcId.slice(6), v.outcome, { remember: Boolean(v.remember) }) })
         }
@@ -544,6 +563,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
       if (route === 'agents/hook' && isPost) {
         if (!hookCaller(req)) return json(req, res, 403, { ok: false, error: { code: 'forbidden', message: 'bad hook token' } })
         const ev = await readJson(req, 16 * 1024 * 1024)
+        if (!externalAgents) return json(req, res, 200, {}) // No opinion: the desktop tool handles its own approvals.
         // A held PermissionRequest answers when the phone does; the tool closing the hook cancels it.
         req.socket.setTimeout(0)
         const ac = new AbortController()
@@ -553,8 +573,9 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
         return
       }
       if (route === 'agents' && !isPost) {
+        if (!externalAgents) return json(req, res, 200, { ok: true, value: { enabled: false, mode: 'pc', away: false, sessions: [], asks: [] } })
         const pc = presence.get()
-        return json(req, res, 200, { ok: true, value: { mode: agents.settings.mode, away: agents.away(), pc: pc && { idleMs: pc.idleMs, locked: pc.locked }, sessions: agentSessions(), asks: agents.asks() } })
+        return json(req, res, 200, { ok: true, value: { enabled: true, mode: agents.settings.mode, away: agents.away(), pc: pc && { idleMs: pc.idleMs, locked: pc.locked }, sessions: agentSessions(), asks: agents.asks() } })
       }
       if (route === 'agents/history' && !isPost) {
         const key = url.searchParams.get('s') || ''
@@ -616,7 +637,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   function events(req, res) {
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no' })
     res.write('retry: 2000\n\n')
-    const b = new Bridge(res, `ws://127.0.0.1:${apiPort()}`, log, () => bridges.delete(b), agents)
+    const b = new Bridge(res, `ws://127.0.0.1:${apiPort()}`, log, () => bridges.delete(b), externalAgents ? agents : null)
     bridges.add(b)
     req.on('close', () => b.close())
   }
@@ -639,6 +660,7 @@ export function createMobile({ apiPort, servePort = apiPort, log = () => {}, tru
   }
 
   function close() {
+    previews.close()
     clearTimeout(hubTimer)
     clearTimeout(hookTimer)
     clearInterval(watchSweep)

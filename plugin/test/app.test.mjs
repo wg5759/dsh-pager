@@ -59,7 +59,7 @@ function makeEl(tag = 'div', id = '') {
  * @param {{search?: string}} opts - `?debug` exposes window.__dsh.
  * @returns the sandbox, with `sandbox.window.__dsh` populated.
  */
-function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { accepted: true } }), readResult } = {}) {
+function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { accepted: true } }), readResult, agentsResult } = {}) {
   const byId = new Map()
   const store = new Map()
   /** Every /m/api/rpc call the page makes, so tests can assert the wire call. */
@@ -89,6 +89,7 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
     // Startup calls fail fast (keeping the sandbox quiet) while RPC posts are
     // recorded, so a test can assert which method the UI actually sent.
     fetch: (url, opts) => {
+      if (String(url) === '/m/api/agents' && agentsResult) return Promise.resolve({ status: 200, json: () => Promise.resolve({ ok: true, value: agentsResult }) })
       if (String(url).indexOf('/m/api/rpc') >= 0 && opts && opts.body) {
         try { rpcCalls.push(JSON.parse(opts.body)) } catch { rpcCalls.push({ raw: opts.body }) }
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(rpcResult(rpcCalls.at(-1))), text: () => Promise.resolve('{"ok":true}') })
@@ -491,4 +492,19 @@ test('UI update waits for pending message operations and unsent images', () => {
   c.queueBusy = {}; s.window.__dsh.S.att = [{}]; update()
   assert.equal(reloads, 0)
   assert.match(s.els.get('toast').textContent, /图片/)
+})
+
+test('DSH-only mode clears stale external records and prompts while preserving native ones', async () => {
+  const s = bootApp({ agentsResult: { enabled: false, mode: 'pc', sessions: [], asks: [] } })
+  const { S, onFrame } = s.window.__dsh
+  const external = chatWithQueue(S, 'agent:codex:old')
+  external.items = [{ k: 'a', seq: 1, text: 'old external record' }]
+  S.chats.set('native', { id: 'native' })
+  S.asks.set('external', { s: external.id }); S.asks.set('native', { s: 'native' })
+  onFrame({ t: 'hello' })
+  await new Promise(r => setImmediate(r))
+  assert.equal(S.agents.enabled, false)
+  assert.equal(S.chats.has(external.id), false)
+  assert.equal(S.chats.has('native'), true)
+  assert.equal(S.cur, null)
 })

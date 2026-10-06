@@ -679,3 +679,110 @@ test('DSH-only mode clears stale external records and prompts while preserving n
   assert.equal(S.chats.has('native'), true)
   assert.equal(S.cur, null)
 })
+
+// Small adapter around the existing makeEl stub, scoped to this regression.
+// It only models video DOM movement. No browser, media, network or real data.
+function installVideoDom(s) {
+  const msgs = s.els.get('msgs')
+  let html = '', slots = []
+  const attrValue = x => x.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+  Object.defineProperty(msgs, 'innerHTML', { configurable: true, get: () => html, set(value) {
+    html = value
+    slots.forEach(box => box.children.forEach(v => { v.isConnected = false }))
+    slots = [...value.matchAll(/<video\b([^>]*)>/g)].map((m, index) => {
+      const v = makeEl('video'), attributes = {}
+      for (const a of m[1].matchAll(/([\w-]+)="([^"]*)"/g)) attributes[a[1]] = attrValue(a[2])
+      v.attributes = attributes
+      for (const [k, value] of Object.entries(attributes)) if (k.startsWith('data-')) v.dataset[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value
+      v.paused = true; v.currentTime = 0; v.isConnected = true; v._preparing = false; v._generation = 0; v.playCalls = 0
+      v.play = () => { v.playCalls++; v.paused = false; return Promise.resolve() }
+      v.pause = () => { v.paused = true }
+      const note = { textContent: '' }, qualityButton = { textContent: '' }
+      const box = {
+        slot: index, children: [v],
+        querySelector(selector) { return selector === 'video' ? this.children[0] || null : selector === '.video-note' ? note : selector === '[data-video-quality]' ? qualityButton : null },
+        removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null },
+        replaceChild(old, current) {
+          if (old.parentNode) old.parentNode.removeChild(old)
+          const at = this.children.indexOf(current)
+          assert.notEqual(at, -1, 'placeholder is still in destination')
+          this.children[at] = old; current.parentNode = null; old.parentNode = this; old.isConnected = true
+        },
+      }
+      v.parentNode = box
+      v.closest = selector => selector === '[data-video-box]' ? v.parentNode : null
+      return box
+    })
+  } })
+  msgs.querySelectorAll = selector => selector === 'video[data-artifact]' ? slots.flatMap(box => box.children) : []
+  return { get slots() { return slots }, videos: () => slots.flatMap(box => box.children) }
+}
+
+function twoVideoTurns(s, c, onFrame) {
+  const text = '[交付视频](<D:/视频项目/delivery/shared.mp4>)'
+  for (const it of [
+    { k: 'u', seq: 1, text: '第一轮' }, { k: 'a', seq: 2, text: '第一轮过程 ' + text },
+    { k: 'a', seq: 3, text }, { k: 'end', seq: 4, reason: 'completed' },
+    { k: 'u', seq: 5, text: '第二轮' }, { k: 'a', seq: 6, text: '第二轮过程' },
+    { k: 'a', seq: 7, text }, { k: 'end', seq: 8, reason: 'completed' },
+  ]) onFrame({ t: 'item', s: c.id, it })
+}
+
+for (const firstProgress of [false, true]) for (const secondPaused of [false, true]) {
+  test(`history reuse retains the second video's slot (firstProgress=${firstProgress}, secondPaused=${secondPaused})`, async () => {
+    const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh, dom = installVideoDom(s)
+    twoVideoTurns(s, c, onFrame)
+    await rendered()
+    assert.equal(dom.videos().length, 2)
+    const [first, second] = dom.videos()
+    if (firstProgress) { first.currentTime = 4.4; first.dataset.quality = 'preview' }
+    second.currentTime = 12.3; second.paused = secondPaused; second.dataset.quality = 'original'
+    tapResult(s, '[data-process]', { process: '2' }) // real renderMsgs, no copied implementation
+    assert.equal(dom.videos().length, 2, 'each historical result still owns a video')
+    assert.equal(dom.slots[1].children[0], second, 'the second result retains its own player node')
+    assert.notEqual(dom.slots[0].children[0], second, 'second player never replaces the first result')
+    assert.equal(second.currentTime, 12.3)
+    assert.equal(second.paused, secondPaused)
+    assert.equal(second.dataset.quality, 'original')
+    if (firstProgress) assert.equal(dom.slots[0].children[0], first, 'first result retains its progressed node too')
+  })
+}
+
+test('a paused preview-preparing player at time zero survives a real message render', async () => {
+  const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh, dom = installVideoDom(s)
+  twoVideoTurns(s, c, onFrame); await rendered()
+  const second = dom.videos()[1]
+  second._preparing = true; second._generation = 9; second.currentTime = 0; second.paused = true
+  tapResult(s, '[data-process]', { process: '2' })
+  assert.equal(dom.videos().length, 2)
+  assert.equal(dom.slots[1].children[0], second)
+  assert.equal(second._preparing, true)
+  assert.equal(second._generation, 9)
+  assert.equal(second.currentTime, 0)
+})
+
+function tapVideoInMessage(s, seq) {
+  const owner = { dataset: { messageSeq: String(seq) } }
+  const button = { dataset: { openVideo: 'D:/视频项目/delivery/shared.mp4' }, closest: selector => selector === '[data-message-seq]' ? owner : null }
+  s.els.get('scroller').dispatch('click', { target: { closest: selector => selector === '[data-open-video]' ? button : null }, preventDefault() {} })
+}
+
+test('a video link plays its own completed message player rather than the first historical match', async () => {
+  const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh, dom = installVideoDom(s)
+  twoVideoTurns(s, c, onFrame); await rendered()
+  const [first, second] = dom.videos()
+  tapVideoInMessage(s, 7)
+  assert.equal(first.playCalls, 0)
+  assert.equal(second.playCalls, 1)
+})
+
+test('a process link with no player of its own uses the existing file viewer', async () => {
+  const s = bootApp({ readResult: () => ({ ok: true, value: { kind: 'media', type: 'video/mp4', rel: 'delivery/shared.mp4', name: 'shared.mp4', size: 20, at: 0 } }) })
+  const c = resultChat(s), { onFrame } = s.window.__dsh, dom = installVideoDom(s)
+  twoVideoTurns(s, c, onFrame); await rendered()
+  tapResult(s, '[data-process]', { process: '2' })
+  tapVideoInMessage(s, 2); await rendered()
+  assert.ok(dom.videos().every(v => v.playCalls === 0))
+  assert.equal(s.readCalls.length, 1)
+  assert.equal(new URL(s.readCalls[0], 'http://test').searchParams.get('path'), 'D:/视频项目/delivery/shared.mp4')
+})

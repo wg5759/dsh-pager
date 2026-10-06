@@ -566,8 +566,8 @@
   function baseName(p) { var s = String(p || '').replace(/[\\/]+$/, ''); return s.slice(Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')) + 1) || s }
   function dirName(rel) { var i = String(rel || '').lastIndexOf('/'); return i < 0 ? '' : rel.slice(0, i) }
   function rawUrl(s, rel) { return '/m/api/raw?s=' + enc(s) + '&path=' + enc(rel) }
-  function videoHtml(s, p, cls) {
-    return '<div class="video-box" data-video-box><video class="' + cls + '" aria-label="播放 ' + esc(baseName(p)) + '" data-artifact="' + esc(p) + '" data-session="' + esc(s) + '" data-quality="preview" controls playsinline preload="none" src="' + esc(rawUrl(s, p)) + '"></video>' +
+  function videoHtml(s, p, cls, messageSeq) {
+    return '<div class="video-box" data-video-box><video class="' + cls + '" aria-label="播放 ' + esc(baseName(p)) + '" data-artifact="' + esc(p) + '" data-session="' + esc(s) + '"' + (messageSeq == null ? '' : ' data-message-seq="' + esc(messageSeq) + '"') + ' data-quality="preview" controls playsinline preload="none" src="' + esc(rawUrl(s, p)) + '"></video>' +
       '<div class="video-options"><span class="video-note">流畅预览</span><button data-video-quality>切换原画</button></div></div>'
   }
   function wireVideos(container) {
@@ -991,7 +991,7 @@
     return chars.slice(0, 120).join('') + (chars.length > 120 ? '…' : '')
   }
   function asstHtml(it, c, resultOnly, completed) {
-    var h = '<div class="a">'
+    var h = '<div class="a" data-message-seq="' + esc(it.seq) + '">'
     if (it.think && !resultOnly) {
       h += '<button class="think" data-think="' + it.seq + '">' + ic('bulb', 's') + '思考过程' + ic(it._t ? 'down' : 'chev', 's') + '</button>'
       if (it._t) h += '<div class="think-body">' + esc(it.think) + '</div>'
@@ -1009,7 +1009,7 @@
       } else h += '<div class="md">' + it._h + '</div>'
       if (resultOnly) h += (it._paths || []).filter(videoPath).map(function (p) {
         return '<div class="artifact"><div class="artifact-head"><b>' + esc(baseName(p)) + '</b><button data-result-path="' + esc(p) + '">' + ic('folder', 's') + '所在文件夹</button></div>' +
-          videoHtml(c.id, p, 'artifact-video') + '</div>'
+          videoHtml(c.id, p, 'artifact-video', it.seq) + '</div>'
       }).join('')
       if (folded) h += (it._paths || []).filter(function (p) { return !videoPath(p) }).map(function (p) {
         return '<div class="artifact artifact-file"><div class="artifact-head"><b>' + esc(baseName(p)) + '</b><button data-result-path="' + esc(p) + '">' + ic('folder', 's') + '所在文件夹</button></div></div>'
@@ -1099,11 +1099,11 @@
     c.pending.forEach(function (p) { h += userHtml(c, p) })
     if (!h && isAgent(c.id)) { var ag = agentOf(c.id); h = '<div class="hint"><b>' + esc(ag ? ag.project || ag.name : '外部会话') + '</b>这个会话的记录会出现在这里，也可以从手机继续它</div>' }
     if (!h) h = '<div class="hint"><b>' + esc(wsTitle(wsOf(c.id))) + '</b>发一条消息开始</div>'
-    var playing = Array.prototype.filter.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return !v.paused || v.currentTime > 0 })
+    var playing = Array.prototype.filter.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v._preparing || !v.paused || v.currentTime > 0 })
     el.msgs.innerHTML = h
     el.msgs.querySelectorAll('video[data-artifact]').forEach(function (v) {
-      var previous = playing.find(function (old) { return old.getAttribute('data-session') === v.getAttribute('data-session') && old.getAttribute('data-artifact') === v.getAttribute('data-artifact') })
-      if (previous) { v.parentNode.replaceChild(previous, v); v = previous }
+      var index = playing.findIndex(function (old) { return old.getAttribute('data-message-seq') === v.getAttribute('data-message-seq') && old.getAttribute('data-session') === v.getAttribute('data-session') && old.getAttribute('data-artifact') === v.getAttribute('data-artifact') })
+      if (index >= 0) { var previous = playing.splice(index, 1)[0]; v.parentNode.replaceChild(previous, v) }
     })
     wireVideos(el.msgs)
     drawTail(c)
@@ -1854,7 +1854,8 @@
     if ((b = e.target.closest('[data-video-quality]'))) { switchVideo(b); return }
     if ((b = e.target.closest('[data-result-path]'))) { fvOpen({ kind: 'path', s: c.id, path: b.dataset.resultPath, folderFor: true, title: '所在文件夹' }); return }
     if ((b = e.target.closest('[data-open-video]'))) {
-      var movie = Array.prototype.find.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v.getAttribute('data-artifact') === b.dataset.openVideo })
+      var owner = b.closest('[data-message-seq]')
+      var movie = owner && Array.prototype.find.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v.getAttribute('data-message-seq') === owner.dataset.messageSeq && v.getAttribute('data-session') === c.id && v.getAttribute('data-artifact') === b.dataset.openVideo })
       if (movie) { movie.scrollIntoView({ block: 'center' }); movie.play().catch(function () { toast('请点视频播放按钮', 'err') }) }
       else fvOpen({ kind: 'path', s: c.id, path: b.dataset.openVideo, autoplay: true, title: baseName(b.dataset.openVideo) })
       return

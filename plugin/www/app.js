@@ -566,10 +566,42 @@
   function baseName(p) { var s = String(p || '').replace(/[\\/]+$/, ''); return s.slice(Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')) + 1) || s }
   function dirName(rel) { var i = String(rel || '').lastIndexOf('/'); return i < 0 ? '' : rel.slice(0, i) }
   function rawUrl(s, rel) { return '/m/api/raw?s=' + enc(s) + '&path=' + enc(rel) }
+  var fullVideo = null
   function videoHtml(s, p, cls, messageSeq) {
     return '<div class="video-box" data-video-box><video class="' + cls + '" aria-label="播放 ' + esc(baseName(p)) + '" data-artifact="' + esc(p) + '" data-session="' + esc(s) + '"' + (messageSeq == null ? '' : ' data-message-seq="' + esc(messageSeq) + '"') + ' data-quality="preview" controls playsinline preload="none" src="' + esc(rawUrl(s, p)) + '"></video>' +
-      '<div class="video-options"><span class="video-note">流畅预览</span><button data-video-retry hidden>重试预览</button><button data-video-quality>切换原画</button></div></div>'
+      '<div class="video-options"><span class="video-note">流畅预览</span><button data-video-retry hidden>重试预览</button><button data-video-quality>切换原画</button><button data-video-fullscreen>全屏</button></div></div>'
   }
+  function closeFullscreenVideo() { if (fullVideo && !fullVideo.closing) { fullVideo.closing = true; closeOverlay() } }
+  function fullscreenVideo(button) {
+    var box = button.closest('[data-video-box]'), v = box && box.querySelector('video')
+    if (!v) return
+    if (fullVideo) { if (fullVideo.v === v) closeFullscreenVideo(); return }
+    var entry = fullVideo = { v: v, box: box, native: false, redraw: false }
+    v._fullscreen = true; box.classList.add('video-expanded'); button.textContent = '退出全屏'
+    pushOverlay('video', function () {
+      fullVideo = null; box.classList.remove('video-expanded'); button.textContent = '全屏'
+      if (document.fullscreenElement === box && typeof document.exitFullscreen === 'function') Promise.resolve(document.exitFullscreen()).catch(function () {})
+      var c = S.chats.get(v.dataset.session)
+      if (entry.redraw && c && S.cur === c.id) renderMsgs(c, false, true)
+      v._fullscreen = false
+    })
+    // The installed Android shell has no native fullscreen host; the same
+    // player fills its viewport. Browsers can additionally hide their chrome.
+    if (!/DSHApp\//.test(navigator.userAgent) && document.fullscreenEnabled !== false && typeof box.requestFullscreen === 'function') {
+      try {
+        Promise.resolve(box.requestFullscreen()).then(function () {
+          if (fullVideo === entry) entry.native = document.fullscreenElement === box
+          else if (document.fullscreenElement === box && typeof document.exitFullscreen === 'function') Promise.resolve(document.exitFullscreen()).catch(function () {})
+        }, function () {})
+      } catch (e) {} // CSS viewport expansion remains usable when denied.
+    }
+  }
+  document.addEventListener('fullscreenchange', function () {
+    if (!fullVideo) return
+    if (document.fullscreenElement === fullVideo.box) fullVideo.native = true
+    else if (fullVideo.native) closeFullscreenVideo()
+  })
+  window.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeFullscreenVideo() })
   function videoNote(v, text) { var n = v.closest('[data-video-box]').querySelector('.video-note'); if (n) n.textContent = text }
   function videoState(v) {
     var box = v.closest('[data-video-box]'), original = v.dataset.quality === 'original'
@@ -1092,6 +1124,9 @@
   }
   function renderMsgs(c, jump, keep) {
     if (c.id !== S.cur) return
+    // Detaching a fullscreen element exits native fullscreen and interrupts
+    // WebView playback. Receive frames normally and paint once after exit.
+    if (fullVideo && fullVideo.v.dataset.session === c.id && fullVideo.v.getAttribute('data-message-seq') != null) { fullVideo.redraw = true; return }
     var stick = jump || (!keep && nearBottom())
     if (!c.loaded) {
       el.older.innerHTML = ''
@@ -1125,7 +1160,7 @@
     c.pending.forEach(function (p) { h += userHtml(c, p) })
     if (!h && isAgent(c.id)) { var ag = agentOf(c.id); h = '<div class="hint"><b>' + esc(ag ? ag.project || ag.name : '外部会话') + '</b>这个会话的记录会出现在这里，也可以从手机继续它</div>' }
     if (!h) h = '<div class="hint"><b>' + esc(wsTitle(wsOf(c.id))) + '</b>发一条消息开始</div>'
-    var playing = Array.prototype.filter.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v._preparing || v._previewError || !v.paused || v.currentTime > 0 })
+    var playing = Array.prototype.filter.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v._fullscreen || v._preparing || v._previewError || !v.paused || v.currentTime > 0 })
     el.msgs.innerHTML = h
     el.msgs.querySelectorAll('video[data-artifact]').forEach(function (v) {
       var index = playing.findIndex(function (old) { return old.getAttribute('data-message-seq') === v.getAttribute('data-message-seq') && old.getAttribute('data-session') === v.getAttribute('data-session') && old.getAttribute('data-artifact') === v.getAttribute('data-artifact') })
@@ -1827,6 +1862,7 @@
   el.fvBody.addEventListener('click', function (e) {
     var en = fv[fv.length - 1], b
     if (!en) return
+    if ((b = e.target.closest('[data-video-fullscreen]'))) { fullscreenVideo(b); return }
     if ((b = e.target.closest('[data-video-retry]'))) { preparePreview(b.closest('[data-video-box]').querySelector('video')); return }
     if ((b = e.target.closest('[data-video-quality]'))) { switchVideo(b); return }
     if ((b = e.target.closest('a[href]'))) { e.preventDefault(); window.open(b.href, '_blank', 'noopener'); return }
@@ -1878,6 +1914,7 @@
   el.scroller.addEventListener('click', function (e) {
     var c = S.chats.get(S.cur), b
     if (!c) return
+    if ((b = e.target.closest('[data-video-fullscreen]'))) { fullscreenVideo(b); return }
     if ((b = e.target.closest('[data-video-retry]'))) { preparePreview(b.closest('[data-video-box]').querySelector('video')); return }
     if ((b = e.target.closest('[data-video-quality]'))) { switchVideo(b); return }
     if ((b = e.target.closest('[data-result-path]'))) { fvOpen({ kind: 'path', s: c.id, path: b.dataset.resultPath, folderFor: true, title: '所在文件夹' }); return }

@@ -65,11 +65,12 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
   /** Every /m/api/rpc call the page makes, so tests can assert the wire call. */
   const rpcCalls = []
   const readCalls = []
+  const windowEvents = new Map(), documentEvents = new Map()
   const doc = {
     getElementById(id) { if (!byId.has(id)) byId.set(id, makeEl('div', id)); return byId.get(id) },
     createElement(tag) { return makeEl(tag) },
     querySelector() { return null }, querySelectorAll() { return [] },
-    addEventListener() {}, removeEventListener() {},
+    addEventListener(t, fn) { if (!documentEvents.has(t)) documentEvents.set(t, []); documentEvents.get(t).push(fn) }, removeEventListener() {},
     documentElement: makeEl('html'), head: makeEl('head'), body: makeEl('body'),
     activeElement: null,
   }
@@ -104,7 +105,7 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
     Image: class { },
     crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000', getRandomValues: (a) => a },
     EventSource: class { constructor() { this.readyState = 0 } close() {} },
-    addEventListener() {}, removeEventListener() {},
+    addEventListener(t, fn) { if (!windowEvents.has(t)) windowEvents.set(t, []); windowEvents.get(t).push(fn) }, removeEventListener() {},
     console,
     JSON, Math, Date, Set, Map, Array, Object, String, Number, Boolean, Promise, Error, RegExp, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
   }
@@ -116,6 +117,8 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
   sandbox.rpcCalls = rpcCalls
   sandbox.readCalls = readCalls
   sandbox.els = byId
+  sandbox.dispatchWindow = (t, event) => (windowEvents.get(t) || []).forEach(fn => fn(event))
+  sandbox.dispatchDocument = (t, event) => (documentEvents.get(t) || []).forEach(fn => fn(event))
   return sandbox
 }
 
@@ -694,14 +697,14 @@ function installVideoDom(s, targetId = 'msgs') {
       for (const a of m[1].matchAll(/([\w-]+)="([^"]*)"/g)) attributes[a[1]] = attrValue(a[2])
       v.attributes = attributes
       for (const [k, value] of Object.entries(attributes)) if (k.startsWith('data-')) v.dataset[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value
-      v.paused = true; v.currentTime = 0; v.isConnected = true; v._preparing = false; v._previewError = false; v._positionPending = false; v._resumePosition = 0; v.error = null; v._generation = 0; v.playCalls = 0; v.duration = 60
+      v.paused = true; v.currentTime = 0; v.isConnected = true; v._fullscreen = false; v._preparing = false; v._previewError = false; v._positionPending = false; v._resumePosition = 0; v.error = null; v._generation = 0; v.playCalls = 0; v.duration = 60
       v.play = () => { v.playCalls++; v.paused = false; return Promise.resolve() }
       v.pause = () => { v.paused = true }
       v.load = () => { v.error = null; v.currentTime = 0 }
-      const note = { textContent: '' }, qualityButton = { textContent: '' }, retryButton = { hidden: true, disabled: false }
+      const note = { textContent: '' }, qualityButton = { textContent: '' }, retryButton = { hidden: true, disabled: false }, fullscreenButton = { textContent: '全屏' }
       const box = {
-        slot: index, children: [v],
-        querySelector(selector) { return selector === 'video' ? this.children[0] || null : selector === '.video-note' ? note : selector === '[data-video-quality]' ? qualityButton : selector === '[data-video-retry]' ? retryButton : null },
+        slot: index, children: [v], classList: makeEl().classList,
+        querySelector(selector) { return selector === 'video' ? this.children[0] || null : selector === '.video-note' ? note : selector === '[data-video-quality]' ? qualityButton : selector === '[data-video-retry]' ? retryButton : selector === '[data-video-fullscreen]' ? fullscreenButton : null },
         removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null },
         replaceChild(old, current) {
           if (old.parentNode) old.parentNode.removeChild(old)
@@ -710,7 +713,7 @@ function installVideoDom(s, targetId = 'msgs') {
           this.children[at] = old; current.parentNode = null; old.parentNode = this; old.isConnected = true
         },
       }
-      qualityButton.closest = retryButton.closest = selector => selector === '[data-video-box]' ? box : null
+      qualityButton.closest = retryButton.closest = fullscreenButton.closest = selector => selector === '[data-video-box]' ? box : null
       v.parentNode = box
       v.closest = selector => selector === '[data-video-box]' ? v.parentNode : null
       return box
@@ -953,4 +956,127 @@ for (const seekPositions of [[6], [6, 0]]) test(`preview preparation keeps the u
   api.reply({ state: 'ready', url: '/synthetic-seek-preview', original: '/synthetic-original' }); await rendered()
   v.dispatch('loadedmetadata')
   assert.equal(v.currentTime, seekPositions.at(-1), 'preparation leaves the source seekable and captures the latest position when loading')
+})
+
+function fullscreenHistory(s, c) {
+  const states = [{ v: 'chat', s: c.id }]
+  s.history.state = states[0]
+  s.history.pushState = state => { states.push(state); s.history.state = state }
+  s.history.back = () => { if (states.length > 1) states.pop(); s.history.state = states.at(-1); s.dispatchWindow('popstate', { state: s.history.state }) }
+  return states
+}
+
+test('explicit fullscreen preserves the active player and native exit closes exactly its overlay', async () => {
+  const { s, c, dom, v, box } = await previewChat(), history = fullscreenHistory(s, c)
+  let requests = 0
+  s.document.fullscreenEnabled = true
+  box.requestFullscreen = () => { requests++; s.document.fullscreenElement = box; s.dispatchDocument('fullscreenchange', {}); return Promise.resolve() }
+  s.document.exitFullscreen = () => { s.document.fullscreenElement = null; s.dispatchDocument('fullscreenchange', {}); return Promise.resolve() }
+  v.currentTime = 7.3; v.paused = false; v.dataset.quality = 'original'
+  const source = v.src
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  await rendered()
+  assert.match(s.els.get('msgs').innerHTML, /data-video-fullscreen/)
+  assert.equal(requests, 1)
+  assert.equal(history.length, 2)
+  assert.equal(box.querySelector('[data-video-fullscreen]').textContent, '退出全屏')
+  assert.equal(dom.videos()[1], v)
+  assert.equal(v.currentTime, 7.3)
+  assert.equal(v.paused, false)
+  assert.equal(v.dataset.quality, 'original')
+  assert.equal(v.src, source)
+  assert.equal(v.playCalls, 0, 'enlarging never restarts the player')
+  s.document.fullscreenElement = null; s.dispatchDocument('fullscreenchange', {})
+  assert.equal(history.length, 1, 'native Escape/exit removes only the fullscreen history entry')
+  assert.equal(s.window.__dsh.S.cur, c.id)
+  assert.equal(box.querySelector('[data-video-fullscreen]').textContent, '全屏')
+  assert.equal(v.currentTime, 7.3)
+})
+
+for (const mode of ['unsupported', 'denied', 'installed-webview']) test(`fullscreen fallback keeps a paused zero-position player and receives frames (${mode})`, async () => {
+  const { s, c, dom, v, box } = await previewChat(), history = fullscreenHistory(s, c)
+  let requests = 0
+  if (mode !== 'unsupported') box.requestFullscreen = () => { requests++; return Promise.reject(new Error('fullscreen denied')) }
+  if (mode === 'installed-webview') s.navigator.userAgent = 'Android DSHApp/1.3.2+10302'
+  v.currentTime = 0; v.paused = true
+  tapVideoControl(s, box, '[data-video-fullscreen]'); await rendered()
+  assert.equal(requests, mode === 'denied' ? 1 : 0)
+  assert.equal(history.length, 2)
+  assert.equal(box.classList.contains('video-expanded'), true, 'viewport expansion remains usable without native fullscreen')
+  tapResult(s, '[data-process]', { process: '2' })
+  s.window.__dsh.onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 9, text: '全屏期间的新结果' } })
+  s.window.__dsh.onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 10, reason: 'completed' } }); await rendered()
+  assert.equal(dom.videos()[1], v, 'frames must never detach the expanded player')
+  assert.ok(c.items.some(it => it.text === '全屏期间的新结果'), 'state still receives the actual frame')
+  assert.doesNotMatch(s.els.get('msgs').innerHTML, /全屏期间的新结果/, 'only message DOM rebuilding is deferred')
+  s.history.back()
+  assert.equal(history.length, 1)
+  assert.equal(s.window.__dsh.S.cur, c.id)
+  assert.equal(box.classList.contains('video-expanded'), false)
+  assert.match(s.els.get('msgs').innerHTML, /全屏期间的新结果/, 'exit paints the received result')
+  assert.equal(dom.videos()[1], v, 'exit restores even a paused player at zero to its own message')
+  assert.equal(v.currentTime, 0)
+  assert.equal(v.paused, true)
+  assert.equal(v.playCalls, 0)
+})
+
+test('file viewer fullscreen exit and Escape preserve the viewer before its own back level', async () => {
+  const s = bootApp({ readResult: () => ({ ok: true, value: { kind: 'media', type: 'video/mp4', rel: 'delivery/shared.mp4', name: 'shared.mp4', size: 20, at: 0 } }) })
+  const c = resultChat(s), history = fullscreenHistory(s, c), dom = installVideoDom(s), viewer = installVideoDom(s, 'fvBody')
+  twoVideoTurns(s, c, s.window.__dsh.onFrame); await rendered()
+  tapVideoInMessage(s, 2); await rendered()
+  const v = viewer.videos()[0], box = viewer.slots[0]
+  v.currentTime = 4.6; v.paused = true
+  assert.equal(history.length, 2)
+  tapVideoControl(s, box, '[data-video-fullscreen]', 'fvBody')
+  assert.equal(history.length, 3)
+  tapVideoControl(s, box, '[data-video-fullscreen]', 'fvBody')
+  assert.equal(history.length, 2, 'exit button only closes the fullscreen layer')
+  assert.equal(s.els.get('fv').hidden, false)
+  assert.equal(viewer.videos()[0], v)
+  assert.equal(v.currentTime, 4.6)
+  tapVideoControl(s, box, '[data-video-fullscreen]', 'fvBody')
+  s.dispatchWindow('keydown', { key: 'Escape' })
+  assert.equal(history.length, 2, 'Escape leaves the viewer open too')
+  assert.equal(v.currentTime, 4.6)
+  assert.equal(v.paused, true)
+  s.history.back()
+  assert.equal(history.length, 1)
+  assert.equal(s.window.__dsh.S.cur, c.id)
+  assert.ok(dom.videos().every(movie => movie.playCalls === 0), 'viewer fullscreen never plays a historical message')
+})
+
+test('a late fullscreen request cannot reopen an exited overlay', async () => {
+  const { s, c, v, box } = await previewChat(), history = fullscreenHistory(s, c)
+  let finish, exits = 0
+  box.requestFullscreen = () => new Promise(resolve => { finish = resolve })
+  s.document.exitFullscreen = () => { exits++; s.document.fullscreenElement = null; return Promise.resolve() }
+  v.currentTime = 3.2; v.paused = true
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  assert.equal(history.length, 1)
+  s.document.fullscreenElement = box; finish(); await rendered()
+  assert.equal(exits, 1, 'obsolete successful API request is exited rather than reviving the overlay')
+  assert.equal(history.length, 1)
+  assert.equal(box.classList.contains('video-expanded'), false)
+  assert.equal(box.querySelector('[data-video-fullscreen]').textContent, '全屏')
+  assert.equal(v.currentTime, 3.2)
+  assert.equal(v.playCalls, 0)
+})
+
+test('fullscreen repeated exit intents wait for one asynchronous popstate', async () => {
+  const { s, c, box } = await previewChat(), history = fullscreenHistory(s, c)
+  let backRequests = 0
+  s.history.back = () => { backRequests++ } // browser popstate arrives later
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  s.dispatchWindow('keydown', { key: 'Escape' })
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  assert.equal(backRequests, 1, 'repeated button/Escape exits cannot retreat to the parent layer')
+  history.pop(); s.history.state = history.at(-1); s.dispatchWindow('popstate', { state: s.history.state })
+  assert.equal(box.classList.contains('video-expanded'), false)
+  assert.equal(s.window.__dsh.S.cur, c.id)
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  assert.equal(backRequests, 2, 'a later fullscreen entry gets its own close intent')
 })

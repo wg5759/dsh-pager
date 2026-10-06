@@ -201,6 +201,11 @@ input, textarea { font: inherit; color: inherit; }
 .video-options { display: flex; align-items: center; gap: 8px; padding: 0 12px; min-height: 44px; color: var(--text3); font-size: 12px; }
 .video-note { flex: 1; }
 .video-options button { color: var(--accent); min-height: 44px; font-size: 12px; }
+.video-box.video-expanded { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; background: #000; padding: var(--sat) 0 var(--sab); }
+.video-expanded > video { flex: 1; min-height: 0; width: 100%; height: 100%; max-height: none; aspect-ratio: auto; object-fit: contain; border-radius: 0; }
+.video-expanded > .video-options { flex: none; flex-wrap: wrap; color: #ddd; background: #111; }
+.video-expanded .video-options button { flex-shrink: 0; }
+.video-box:fullscreen { width: 100%; height: 100%; }
 .fl .row.selected { background: var(--accent-soft, var(--bg)); box-shadow: inset 3px 0 var(--accent); }
 .tools { background: var(--surface); border-radius: 14px; box-shadow: 0 0 0 1px var(--line) inset; overflow: hidden; }
 .tg { display: flex; align-items: center; gap: 8px; width: 100%; padding: 10px 12px; text-align: left; color: var(--text2); font-size: 13.5px; }

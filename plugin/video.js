@@ -37,7 +37,10 @@ export function createVideoPreviews({ dir, ffmpeg = 'ffmpeg', spawnProcess = spa
     const key = crypto.createHash('sha256').update(JSON.stringify([source, stat.size, stat.mtimeMs, 'mobile-1280-30-v1'])).digest('hex')
     const file = path.join(dir, key + '.mp4')
     try { if (fs.statSync(file).isFile() && fs.statSync(file).size > 0) return { state: 'ready', file } } catch {}
-    if (jobs.has(key)) return jobs.get(key)
+    // A completed job cannot remain ready after its cached bytes are gone.
+    const previous = jobs.get(key)
+    if (previous && previous.state !== 'ready') return previous
+    if (previous) jobs.delete(key)
     if (closed || queue.length >= 8) return { state: 'unavailable' }
     try { fs.mkdirSync(dir, { recursive: true }) } catch { return { state: 'unavailable' } }
     const job = { state: 'preparing', source, file, temp: path.join(dir, key + '.partial.mp4') }

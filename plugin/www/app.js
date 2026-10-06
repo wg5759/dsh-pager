@@ -568,54 +568,80 @@
   function rawUrl(s, rel) { return '/m/api/raw?s=' + enc(s) + '&path=' + enc(rel) }
   function videoHtml(s, p, cls, messageSeq) {
     return '<div class="video-box" data-video-box><video class="' + cls + '" aria-label="播放 ' + esc(baseName(p)) + '" data-artifact="' + esc(p) + '" data-session="' + esc(s) + '"' + (messageSeq == null ? '' : ' data-message-seq="' + esc(messageSeq) + '"') + ' data-quality="preview" controls playsinline preload="none" src="' + esc(rawUrl(s, p)) + '"></video>' +
-      '<div class="video-options"><span class="video-note">流畅预览</span><button data-video-quality>切换原画</button></div></div>'
+      '<div class="video-options"><span class="video-note">流畅预览</span><button data-video-retry hidden>重试预览</button><button data-video-quality>切换原画</button></div></div>'
+  }
+  function videoNote(v, text) { var n = v.closest('[data-video-box]').querySelector('.video-note'); if (n) n.textContent = text }
+  function videoState(v) {
+    var box = v.closest('[data-video-box]'), original = v.dataset.quality === 'original'
+    var quality = box.querySelector('[data-video-quality]'), retry = box.querySelector('[data-video-retry]')
+    if (quality) quality.textContent = original ? '切换流畅' : '切换原画'
+    if (retry) { retry.hidden = !v._previewError || original; retry.disabled = !!v._preparing }
+    videoNote(v, v._preparing ? '正在准备流畅预览…' : v._previewError ? '预览暂不能播放，请重试预览或切换原画' : original ? '原画' : '流畅预览')
+  }
+  function videoPosition(v) { return v._positionPending ? v._resumePosition || 0 : v.currentTime || 0 }
+  function loadVideo(v, url, generation, position) {
+    v._resumePosition = position; v._positionPending = true
+    v.addEventListener('loadedmetadata', function () {
+      if (!v.isConnected || generation !== (v._generation || 0)) return
+      if (position && v.duration) v.currentTime = Math.min(position, v.duration)
+      v._positionPending = false
+    }, { once: true })
+    v.src = url; v.load()
+    v.play().catch(function () {
+      if (v.isConnected && generation === (v._generation || 0) && !v._previewError && !v.error) videoNote(v, '准备好了，点播放继续')
+    })
+  }
+  function preparePreview(v) {
+    if (!v || !v.isConnected || v.dataset.quality === 'original') return
+    if (v._preparing) { v.pause(); return }
+    var attempts = 0, generation = (v._generation || 0) + 1
+    v.pause(); v._generation = generation; v._preparing = true; v._previewError = false; v.dataset.previewReady = ''
+    videoState(v)
+    function check() {
+      if (!v.isConnected || generation !== (v._generation || 0)) return
+      get('/m/api/video?s=' + enc(v.dataset.session) + '&path=' + enc(v.dataset.artifact)).then(function (r) {
+        if (!v.isConnected || generation !== (v._generation || 0)) return
+        if (r.state === 'preparing' && attempts++ < 600) { setTimeout(check, 1000); return }
+        v._preparing = false
+        if (r.state !== 'ready') { v.dataset.quality = 'original'; r.url = r.original }
+        else v.dataset.previewReady = '1'
+        videoState(v)
+        if (r.state !== 'ready') videoNote(v, '流畅预览暂不可用，正在播放原画')
+        loadVideo(v, r.url, generation, videoPosition(v))
+      }, function (err) {
+        if (!v.isConnected || generation !== (v._generation || 0)) return
+        v._preparing = false
+        if (err.code === 'not-found') {
+          v.dataset.quality = 'original'; videoState(v); videoNote(v, '正在播放原画')
+          loadVideo(v, rawUrl(v.dataset.session, v.dataset.artifact), generation, videoPosition(v))
+        } else { v._previewError = true; videoState(v) }
+      })
+    }
+    check()
   }
   function wireVideos(container) {
     container.querySelectorAll('video[data-artifact]').forEach(function (v) {
-      function note(text) { var n = v.closest('[data-video-box]').querySelector('.video-note'); if (n) n.textContent = text }
-      var qualityButton = v.closest('[data-video-box]').querySelector('[data-video-quality]')
-      if (qualityButton) qualityButton.textContent = v.dataset.quality === 'original' ? '切换流畅' : '切换原画'
-      note(v._preparing ? '正在准备流畅预览…' : v.dataset.quality === 'original' ? '原画' : '流畅预览')
-      v.onerror = function () { if (!v._preparing) note('暂不能播放，请重试或切换原画') }
+      videoState(v)
+      v.onerror = function () {
+        v._generation = (v._generation || 0) + 1; v._preparing = false
+        v._previewError = v.dataset.quality !== 'original'; v.dataset.previewReady = ''; videoState(v)
+        if (!v._previewError) videoNote(v, '原画暂不能播放，可切换流畅预览')
+      }
       v.onplay = function () {
         if (v.dataset.quality === 'original' || v.dataset.previewReady === '1') return
-        if (v._preparing) { v.pause(); return }
-        v.pause(); v._preparing = true
-        var generation = v._generation || 0, position = v.currentTime || 0, attempts = 0
-        note('正在准备流畅预览…')
-        function check() {
-          if (!v.isConnected || generation !== (v._generation || 0)) return
-          get('/m/api/video?s=' + enc(v.dataset.session) + '&path=' + enc(v.dataset.artifact)).then(function (r) {
-            if (!v.isConnected || generation !== (v._generation || 0)) return
-            if (r.state === 'preparing' && attempts++ < 600) { setTimeout(check, 1000); return }
-            v._preparing = false
-            position = v.currentTime || position
-            if (r.state !== 'ready') { v.dataset.quality = 'original'; r.url = r.original; note('流畅预览暂不可用，正在播放原画') }
-            else { v.dataset.previewReady = '1'; note('流畅预览') }
-            v.addEventListener('loadedmetadata', function () { if (position && v.duration) v.currentTime = Math.min(position, v.duration) }, { once: true })
-            v.src = r.url; v.load(); v.play().catch(function () { note('准备好了，点播放继续') })
-            var button = v.closest('[data-video-box]').querySelector('[data-video-quality]')
-            if (button) button.textContent = v.dataset.quality === 'original' ? '切换流畅' : '切换原画'
-          }, function (err) {
-            if (!v.isConnected || generation !== (v._generation || 0)) return
-            v._preparing = false
-            if (err.code === 'not-found') { v.dataset.quality = 'original'; note('正在播放原画'); v.play().catch(function () {}) }
-            else note('暂时连接不上，请点播放重试')
-          })
-        }
-        check()
+        if (v._previewError) { v.pause(); return }
+        preparePreview(v)
       }
     })
   }
   function switchVideo(button) {
-    var box = button.closest('[data-video-box]'), v = box && box.querySelector('video'), position = v && v.currentTime || 0
+    var box = button.closest('[data-video-box]'), v = box && box.querySelector('video'), position = v && videoPosition(v)
     if (!v) return
-    v.pause(); v._generation = (v._generation || 0) + 1; v._preparing = false
+    v.pause(); v._generation = (v._generation || 0) + 1; v._preparing = false; v._previewError = false
     v.dataset.quality = v.dataset.quality === 'original' ? 'preview' : 'original'
-    v.dataset.previewReady = ''; button.textContent = v.dataset.quality === 'original' ? '切换流畅' : '切换原画'
-    box.querySelector('.video-note').textContent = v.dataset.quality === 'original' ? '原画' : '流畅预览'
-    v.addEventListener('loadedmetadata', function () { if (position && v.duration) v.currentTime = Math.min(position, v.duration) }, { once: true })
-    v.src = rawUrl(v.dataset.session, v.dataset.artifact); v.load(); v.play().catch(function () {})
+    v.dataset.previewReady = ''; videoState(v)
+    if (v.dataset.quality === 'preview') preparePreview(v)
+    else loadVideo(v, rawUrl(v.dataset.session, v.dataset.artifact), v._generation, position)
   }
   function fvOpen(en) {
     fv.push(en)
@@ -1099,7 +1125,7 @@
     c.pending.forEach(function (p) { h += userHtml(c, p) })
     if (!h && isAgent(c.id)) { var ag = agentOf(c.id); h = '<div class="hint"><b>' + esc(ag ? ag.project || ag.name : '外部会话') + '</b>这个会话的记录会出现在这里，也可以从手机继续它</div>' }
     if (!h) h = '<div class="hint"><b>' + esc(wsTitle(wsOf(c.id))) + '</b>发一条消息开始</div>'
-    var playing = Array.prototype.filter.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v._preparing || !v.paused || v.currentTime > 0 })
+    var playing = Array.prototype.filter.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v._preparing || v._previewError || !v.paused || v.currentTime > 0 })
     el.msgs.innerHTML = h
     el.msgs.querySelectorAll('video[data-artifact]').forEach(function (v) {
       var index = playing.findIndex(function (old) { return old.getAttribute('data-message-seq') === v.getAttribute('data-message-seq') && old.getAttribute('data-session') === v.getAttribute('data-session') && old.getAttribute('data-artifact') === v.getAttribute('data-artifact') })
@@ -1801,6 +1827,7 @@
   el.fvBody.addEventListener('click', function (e) {
     var en = fv[fv.length - 1], b
     if (!en) return
+    if ((b = e.target.closest('[data-video-retry]'))) { preparePreview(b.closest('[data-video-box]').querySelector('video')); return }
     if ((b = e.target.closest('[data-video-quality]'))) { switchVideo(b); return }
     if ((b = e.target.closest('a[href]'))) { e.preventDefault(); window.open(b.href, '_blank', 'noopener'); return }
     if ((b = e.target.closest('[data-fe]'))) {
@@ -1851,12 +1878,13 @@
   el.scroller.addEventListener('click', function (e) {
     var c = S.chats.get(S.cur), b
     if (!c) return
+    if ((b = e.target.closest('[data-video-retry]'))) { preparePreview(b.closest('[data-video-box]').querySelector('video')); return }
     if ((b = e.target.closest('[data-video-quality]'))) { switchVideo(b); return }
     if ((b = e.target.closest('[data-result-path]'))) { fvOpen({ kind: 'path', s: c.id, path: b.dataset.resultPath, folderFor: true, title: '所在文件夹' }); return }
     if ((b = e.target.closest('[data-open-video]'))) {
       var owner = b.closest('[data-message-seq]')
       var movie = owner && Array.prototype.find.call(el.msgs.querySelectorAll('video[data-artifact]'), function (v) { return v.getAttribute('data-message-seq') === owner.dataset.messageSeq && v.getAttribute('data-session') === c.id && v.getAttribute('data-artifact') === b.dataset.openVideo })
-      if (movie) { movie.scrollIntoView({ block: 'center' }); movie.play().catch(function () { toast('请点视频播放按钮', 'err') }) }
+      if (movie) { movie.scrollIntoView({ block: 'center' }); if (movie._previewError && movie.dataset.quality !== 'original') preparePreview(movie); else movie.play().catch(function () { toast('请点视频播放按钮', 'err') }) }
       else fvOpen({ kind: 'path', s: c.id, path: b.dataset.openVideo, autoplay: true, title: baseName(b.dataset.openVideo) })
       return
     }

@@ -682,8 +682,8 @@ test('DSH-only mode clears stale external records and prompts while preserving n
 
 // Small adapter around the existing makeEl stub, scoped to this regression.
 // It only models video DOM movement. No browser, media, network or real data.
-function installVideoDom(s) {
-  const msgs = s.els.get('msgs')
+function installVideoDom(s, targetId = 'msgs') {
+  const msgs = s.els.get(targetId)
   let html = '', slots = []
   const attrValue = x => x.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
   Object.defineProperty(msgs, 'innerHTML', { configurable: true, get: () => html, set(value) {
@@ -694,13 +694,14 @@ function installVideoDom(s) {
       for (const a of m[1].matchAll(/([\w-]+)="([^"]*)"/g)) attributes[a[1]] = attrValue(a[2])
       v.attributes = attributes
       for (const [k, value] of Object.entries(attributes)) if (k.startsWith('data-')) v.dataset[k.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value
-      v.paused = true; v.currentTime = 0; v.isConnected = true; v._preparing = false; v._generation = 0; v.playCalls = 0
+      v.paused = true; v.currentTime = 0; v.isConnected = true; v._preparing = false; v._previewError = false; v._positionPending = false; v._resumePosition = 0; v.error = null; v._generation = 0; v.playCalls = 0; v.duration = 60
       v.play = () => { v.playCalls++; v.paused = false; return Promise.resolve() }
       v.pause = () => { v.paused = true }
-      const note = { textContent: '' }, qualityButton = { textContent: '' }
+      v.load = () => { v.error = null; v.currentTime = 0 }
+      const note = { textContent: '' }, qualityButton = { textContent: '' }, retryButton = { hidden: true, disabled: false }
       const box = {
         slot: index, children: [v],
-        querySelector(selector) { return selector === 'video' ? this.children[0] || null : selector === '.video-note' ? note : selector === '[data-video-quality]' ? qualityButton : null },
+        querySelector(selector) { return selector === 'video' ? this.children[0] || null : selector === '.video-note' ? note : selector === '[data-video-quality]' ? qualityButton : selector === '[data-video-retry]' ? retryButton : null },
         removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null },
         replaceChild(old, current) {
           if (old.parentNode) old.parentNode.removeChild(old)
@@ -709,12 +710,14 @@ function installVideoDom(s) {
           this.children[at] = old; current.parentNode = null; old.parentNode = this; old.isConnected = true
         },
       }
+      qualityButton.closest = retryButton.closest = selector => selector === '[data-video-box]' ? box : null
       v.parentNode = box
       v.closest = selector => selector === '[data-video-box]' ? v.parentNode : null
       return box
     })
   } })
   msgs.querySelectorAll = selector => selector === 'video[data-artifact]' ? slots.flatMap(box => box.children) : []
+  msgs.querySelector = selector => selector === 'video' ? slots[0]?.children[0] || null : null
   return { get slots() { return slots }, videos: () => slots.flatMap(box => box.children) }
 }
 
@@ -785,4 +788,169 @@ test('a process link with no player of its own uses the existing file viewer', a
   assert.ok(dom.videos().every(v => v.playCalls === 0))
   assert.equal(s.readCalls.length, 1)
   assert.equal(new URL(s.readCalls[0], 'http://test').searchParams.get('path'), 'D:/视频项目/delivery/shared.mp4')
+})
+
+function previewApi(s) {
+  const original = s.fetch, calls = [], pending = []
+  s.fetch = (url, opts) => {
+    if (!String(url).startsWith('/m/api/video?')) return original(url, opts)
+    calls.push(String(url))
+    return new Promise((resolve, reject) => pending.push({ resolve, reject }))
+  }
+  return {
+    calls,
+    reply(value) { assert.ok(pending.length, 'there is a pending preview request'); pending.shift().resolve({ status: 200, json: () => Promise.resolve({ ok: true, value }) }) },
+    fail(code) { assert.ok(pending.length, 'there is a pending preview request'); pending.shift().reject(Object.assign(new Error(code), { code })) },
+  }
+}
+function tapVideoControl(s, box, selector, targetId = 'scroller') {
+  const button = box.querySelector(selector)
+  s.els.get(targetId).dispatch('click', { target: { closest: wanted => wanted === selector ? button : null }, preventDefault() {} })
+}
+async function previewChat() {
+  const s = bootApp(), c = resultChat(s), dom = installVideoDom(s), api = previewApi(s)
+  twoVideoTurns(s, c, s.window.__dsh.onFrame); await rendered()
+  return { s, c, dom, api, v: dom.videos()[1], box: dom.slots[1] }
+}
+
+test('an expired preview retries only on explicit intent and keeps its position across a second load error', async () => {
+  const { s, dom, api, v, box } = await previewChat()
+  v.dataset.previewReady = '1'; v.currentTime = 8.2
+  v.error = { code: 4 }; v.paused = true; v.onerror()
+  v.play = () => { v.playCalls++; return v.error ? Promise.reject(new Error('NotSupportedError without onplay')) : Promise.resolve() }
+  assert.equal(api.calls.length, 0, 'MediaError itself makes no API request')
+  tapVideoControl(s, box, '[data-video-retry]')
+  tapVideoControl(s, box, '[data-video-retry]')
+  assert.equal(api.calls.length, 1, 'explicit retry works even if native play never emits onplay, and duplicate clicks merge')
+  api.reply({ state: 'ready', url: '/synthetic-expired-preview', original: '/synthetic-original' }); await rendered()
+  assert.equal(v.currentTime, 0, 'loading a replacement resets native position before metadata')
+  v.error = { code: 4 }; v.onerror()
+  tapVideoControl(s, box, '[data-video-retry]')
+  assert.equal(api.calls.length, 2, 'another retry is an explicit user action')
+  api.reply({ state: 'ready', url: '/synthetic-repaired-preview', original: '/synthetic-original' }); await rendered()
+  v.dispatch('loadedmetadata')
+  assert.equal(v.currentTime, 8.2, 'desired position survives load -> zero -> MediaError before metadata')
+  assert.equal(box.querySelector('[data-video-retry]').hidden, true)
+  assert.equal(dom.videos()[1], v)
+})
+
+test('the file viewer has the same explicit preview retry without relying on native onplay', async () => {
+  const s = bootApp({ readResult: () => ({ ok: true, value: { kind: 'media', type: 'video/mp4', rel: 'delivery/shared.mp4', name: 'shared.mp4', size: 20, at: 0 } }) })
+  const c = resultChat(s), dom = installVideoDom(s), viewer = installVideoDom(s, 'fvBody'), api = previewApi(s)
+  twoVideoTurns(s, c, s.window.__dsh.onFrame); await rendered()
+  tapVideoInMessage(s, 2); await rendered()
+  const v = viewer.videos()[0], box = viewer.slots[0]
+  assert.ok(v, 'the actual file viewer renders a player')
+  v.dataset.previewReady = '1'; v.currentTime = 6.4; v.error = { code: 4 }; v.onerror()
+  v.play = () => { v.playCalls++; return v.error ? Promise.reject(new Error('NotSupportedError without onplay')) : Promise.resolve() }
+  assert.equal(api.calls.length, 0)
+  assert.equal(box.querySelector('[data-video-retry]').hidden, false)
+  tapVideoControl(s, box, '[data-video-retry]', 'fvBody')
+  tapVideoControl(s, box, '[data-video-retry]', 'fvBody')
+  assert.equal(api.calls.length, 1)
+  api.reply({ state: 'ready', url: '/synthetic-ready-preview', original: '/synthetic-original' }); await rendered()
+  v.dispatch('loadedmetadata')
+  assert.equal(v.currentTime, 6.4)
+  assert.equal(box.querySelector('[data-video-retry]').hidden, true)
+  assert.ok(dom.videos().every(movie => movie.playCalls === 0), 'viewer retry does not touch historical chat players')
+})
+
+test('a failed paused preview at time zero retains its node and retry UI through message rendering', async () => {
+  const { s, dom, api, v } = await previewChat()
+  v.dataset.previewReady = '1'; v.currentTime = 0; v.paused = true; v.error = { code: 4 }; v.onerror()
+  assert.equal(api.calls.length, 0)
+  v.onplay()
+  assert.equal(api.calls.length, 0, 'an error does not create an implicit retry loop')
+  tapResult(s, '[data-process]', { process: '2' })
+  assert.equal(dom.slots[1].children[0], v, 'the failed zero-position node is still owned by its message')
+  const box = dom.slots[1]
+  assert.equal(box.querySelector('[data-video-retry]').hidden, false)
+  assert.match(box.querySelector('.video-note').textContent, /暂不能播放.*重试预览/)
+  assert.equal(api.calls.length, 0, 're-rendering does not prepare a video')
+  tapVideoInMessage(s, 7)
+  assert.equal(api.calls.length, 1, 'its explicit delivery link can also request a retry')
+})
+
+test('a late preview API reply cannot change the user-selected original mode', async () => {
+  const { s, api, v, box } = await previewChat()
+  v.currentTime = 9.1; v.onplay()
+  assert.equal(api.calls.length, 1)
+  tapVideoControl(s, box, '[data-video-quality]')
+  const originalSrc = v.src
+  api.reply({ state: 'ready', url: '/obsolete-preview-response', original: '/synthetic-original' }); await rendered()
+  assert.equal(v.dataset.quality, 'original')
+  assert.equal(v.src, originalSrc)
+  assert.equal(box.querySelector('.video-note').textContent, '原画')
+  assert.equal(box.querySelector('[data-video-retry]').hidden, true)
+})
+
+test('late metadata and play rejection preserve current mode and honest MediaError UI', async () => {
+  const { s, api, v, box } = await previewChat()
+  const playRejections = []
+  v.play = () => new Promise((resolve, reject) => playRejections.push(reject))
+  v.currentTime = 8.2; v.onplay()
+  api.reply({ state: 'ready', url: '/synthetic-expired-preview', original: '/synthetic-original' }); await rendered()
+  const staleMetadata = v.listeners.loadedmetadata[0].fn
+  v.error = { code: 4 }; v.onerror()
+  playRejections.shift()(new Error('MediaError rejects after error event')); await rendered()
+  assert.match(box.querySelector('.video-note').textContent, /暂不能播放.*重试预览/)
+  assert.equal(box.querySelector('[data-video-retry]').hidden, false)
+  assert.equal(api.calls.length, 1, 'error and late play rejection do not retry')
+  tapVideoControl(s, box, '[data-video-quality]')
+  const originalMetadata = v.listeners.loadedmetadata.at(-1).fn
+  tapVideoControl(s, box, '[data-video-quality]')
+  assert.equal(api.calls.length, 2, 'switching back to preview prepares directly')
+  v.currentTime = 2.5
+  staleMetadata(); originalMetadata()
+  playRejections.shift()(new Error('old original play rejects after next mode')); await rendered()
+  assert.equal(v.currentTime, 2.5, 'metadata from obsolete sources cannot seek the new mode')
+  assert.equal(box.querySelector('.video-note').textContent, '正在准备流畅预览…', 'old play.catch cannot replace the current preparation note')
+  api.reply({ state: 'ready', url: '/synthetic-new-preview', original: '/synthetic-original' }); await rendered()
+  v.listeners.loadedmetadata.at(-1).fn()
+  assert.equal(v.currentTime, 8.2, 'current metadata restores the intended position')
+})
+
+test('normal first play and preview mode switch prepare once while unavailable remains an original fallback', async () => {
+  const { s, api, v, box } = await previewChat()
+  assert.equal(box.querySelector('[data-video-retry]').hidden, true, 'healthy players do not expose retry')
+  v.currentTime = 5.7; v.onplay(); v.onplay()
+  assert.equal(api.calls.length, 1)
+  api.reply({ state: 'ready', url: '/synthetic-first-preview', original: '/synthetic-original' }); await rendered()
+  v.dispatch('loadedmetadata')
+  assert.equal(v.currentTime, 5.7)
+  v.onplay(); assert.equal(api.calls.length, 1, 'a ready preview does not prepare again')
+  tapVideoControl(s, box, '[data-video-quality]')
+  v.listeners.loadedmetadata.at(-1).fn()
+  tapVideoControl(s, box, '[data-video-quality]')
+  assert.equal(api.calls.length, 2, 'switching to preview does not require a new native onplay')
+  api.reply({ state: 'unavailable', original: '/synthetic-original-only' }); await rendered()
+  assert.equal(v.dataset.quality, 'original')
+  assert.equal(v.src, '/synthetic-original-only')
+  assert.equal(box.querySelector('[data-video-retry]').hidden, true)
+  v.onplay(); assert.equal(api.calls.length, 2, 'unavailable does not automatically requeue an encoder')
+})
+
+test('preview request failures wait for explicit retry and not-found still falls back to original', async () => {
+  const { s, api, v, box } = await previewChat()
+  v.onplay(); api.fail('offline'); await rendered()
+  assert.equal(box.querySelector('[data-video-retry]').hidden, false)
+  assert.match(box.querySelector('.video-note').textContent, /暂不能播放.*重试预览/)
+  v.onplay(); assert.equal(api.calls.length, 1)
+  tapVideoControl(s, box, '[data-video-retry]')
+  assert.equal(api.calls.length, 2)
+  api.fail('not-found'); await rendered()
+  assert.equal(v.dataset.quality, 'original')
+  assert.match(v.src, /^\/m\/api\/raw\?s=results&path=/)
+  assert.equal(box.querySelector('[data-video-retry]').hidden, true)
+  v.onplay(); assert.equal(api.calls.length, 2)
+})
+
+for (const seekPositions of [[6], [6, 0]]) test(`preview preparation keeps the user's latest seek (${seekPositions.join(' -> ')})`, async () => {
+  const { api, v } = await previewChat()
+  v.currentTime = 3; v.onplay()
+  assert.equal(api.calls.length, 1)
+  for (const position of seekPositions) v.currentTime = position
+  api.reply({ state: 'ready', url: '/synthetic-seek-preview', original: '/synthetic-original' }); await rendered()
+  v.dispatch('loadedmetadata')
+  assert.equal(v.currentTime, seekPositions.at(-1), 'preparation leaves the source seekable and captures the latest position when loading')
 })

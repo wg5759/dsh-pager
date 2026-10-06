@@ -258,7 +258,7 @@
 
   function chatState(id) {
     return { id: id, items: [], pending: [], partial: null, lastSeq: -1, firstSeq: -1, hasMore: false, loaded: false, loading: false, err: false,
-      buf: [], open: new Set(), processOpen: new Set(), todos: null, todoOpen: false, queue: [], title: '', w: null, model: null, models: null }
+      buf: [], open: new Set(), processOpen: new Set(), resultOpen: new Set(), todos: null, todoOpen: false, queue: [], title: '', w: null, model: null, models: null }
   }
   // Auto titles occasionally arrive as Markdown ("**Session Title:** x").
   function cleanTitle(t) { return String(t || '').replace(/\*\*|__|`/g, '').replace(/^\s*(session\s*)?title\s*[:：]\s*/i, '').trim() }
@@ -968,7 +968,13 @@
     }).join('')
     return '<div class="u' + (it.pending ? ' pending' : '') + '">' + (imgs ? '<div class="imgs">' + imgs + '</div>' : '') + (it.text ? '<div class="bub">' + esc(it.text) + '</div>' : '') + '</div>'
   }
-  function asstHtml(it, c, resultOnly) {
+  function resultExcerpt(text) {
+    var first = text.trim().split(/\n\s*\n/)[0].replace(/\[([^\]]+)\]\((?:<[^>]*>|[^)]*)\)/g, '$1')
+      .replace(/^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)/gm, '').replace(/[`*_]/g, '').replace(/\s+/g, ' ').trim()
+    var chars = Array.from(first)
+    return chars.slice(0, 120).join('') + (chars.length > 120 ? '…' : '')
+  }
+  function asstHtml(it, c, resultOnly, completed) {
     var h = '<div class="a">'
     if (it.think && !resultOnly) {
       h += '<button class="think" data-think="' + it.seq + '">' + ic('bulb', 's') + '思考过程' + ic(it._t ? 'down' : 'chev', 's') + '</button>'
@@ -980,10 +986,17 @@
         var ctx = { root: root, paths: [] }
         it._h = md(it.text, ctx); it._paths = ctx.paths; it._root = root
       }
-      h += '<div class="md">' + it._h + '</div>'
+      var folded = resultOnly && completed && (it.text.length > 600 || it.text.split('\n').length > 12)
+      if (folded) {
+        var opened = c.resultOpen && c.resultOpen.has(it.seq)
+        h += '<div class="result-excerpt">' + esc(resultExcerpt(it.text)) + '</div><details class="result-details" data-result-details="' + it.seq + '"' + (opened ? ' open' : '') + '><summary>查看完整结果</summary><div class="md">' + it._h + '</div></details>'
+      } else h += '<div class="md">' + it._h + '</div>'
       if (resultOnly) h += (it._paths || []).filter(videoPath).map(function (p) {
         return '<div class="artifact"><div class="artifact-head"><b>' + esc(baseName(p)) + '</b><button data-result-path="' + esc(p) + '">' + ic('folder', 's') + '所在文件夹</button></div>' +
           videoHtml(c.id, p, 'artifact-video') + '</div>'
+      }).join('')
+      if (folded) h += (it._paths || []).filter(function (p) { return !videoPath(p) }).map(function (p) {
+        return '<div class="artifact artifact-file"><div class="artifact-head"><b>' + esc(baseName(p)) + '</b><button data-result-path="' + esc(p) + '">' + ic('folder', 's') + '所在文件夹</button></div></div>'
       }).join('')
       if (it._fin) h += '<div class="acts"><button data-copymsg="' + it.seq + '">' + ic('copy', 's') + '复制</button></div>'
     }
@@ -1058,7 +1071,7 @@
       if (!done) final = null
       if (final) final._fin = true
       h += processHtml(c, turn, final, !done)
-      if (final) h += asstHtml(final, c, true)
+      if (final) h += asstHtml(final, c, true, end && end.reason === 'completed')
       if (end) h += endHtml(end)
       turn = []
     }
@@ -1810,6 +1823,15 @@
     })
   })()
 
+  // Native details toggles its existing DOM; saving its state must not rebuild
+  // message/video nodes. Capture is needed because toggle does not bubble.
+  el.msgs.addEventListener('toggle', function (e) {
+    var d = e.target, c = S.chats.get(S.cur)
+    if (!c || d.tagName !== 'DETAILS' || d.dataset.resultDetails == null) return
+    if (!c.resultOpen) c.resultOpen = new Set()
+    var key = +d.dataset.resultDetails
+    if (d.open) c.resultOpen.add(key); else c.resultOpen.delete(key)
+  }, true)
   el.scroller.addEventListener('click', function (e) {
     var c = S.chats.get(S.cur), b
     if (!c) return

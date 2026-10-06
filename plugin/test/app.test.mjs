@@ -414,6 +414,70 @@ test('completed turns show the final result and keep commentary and tools behind
   assert.ok(!s.els.get('msgs').innerHTML.includes('正在分析镜头'))
 })
 
+test('a long completed result folds details but keeps videos and file cards outside', async () => {
+  const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh
+  const text = '成片已完成 <检查>。\n\n' + '详细检查说明'.repeat(105) + '\n\n' +
+    '[成片](<D:/视频项目/交付/成片 01.mp4>)\n' +
+    '[同一成片](<D:/视频项目/交付/成片 01.mp4>)\n' +
+    '`D:\\视频项目\\交付\\说明.md`\n`D:\\别的项目\\外部.md`'
+  onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 1, text } })
+  onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 2, reason: 'completed' } })
+  await rendered()
+  const html = s.els.get('msgs').innerHTML
+  assert.match(html, /class="result-excerpt">成片已完成 &lt;检查&gt;。<\/div>/)
+  assert.match(html, /<details class="result-details" data-result-details="1"><summary>查看完整结果<\/summary>/)
+  assert.match(html.slice(html.indexOf('<details'), html.indexOf('</details>')), /详细检查说明/)
+  const visibleCards = html.slice(html.indexOf('</details>') + '</details>'.length)
+  assert.equal((visibleCards.match(/<video /g) || []).length, 1, 'deduplicated existing path registry')
+  assert.match(visibleCards, /data-result-path="D:\\视频项目\\交付\\说明.md"/)
+  assert.ok(!visibleCards.includes('别的项目'))
+  assert.equal(s.rpcCalls.length, 0)
+})
+
+test('line-heavy completed results fold; short, failed and interrupted answers stay open', async () => {
+  for (const [reason, text, folded] of [
+    ['completed', Array.from({ length: 13 }, (_, i) => '检查项 ' + i).join('\n'), true],
+    ['completed', '两条视频已完成。', false],
+    ['failed', '错误细节'.repeat(160), false],
+    ['interrupted', '未完成事项'.repeat(160), false],
+  ]) {
+    const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh
+    onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 1, text } })
+    onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 2, reason } })
+    await rendered()
+    assert.equal(s.els.get('msgs').innerHTML.includes('data-result-details'), folded, reason)
+  }
+})
+
+test('native result toggle saves state without rendering and copying still returns all text', async () => {
+  const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh
+  const text = '切片已完成。\n\n' + '完整内容'.repeat(160)
+  for (const it of [
+    { k: 'a', seq: 1, text: '处理过程' },
+    { k: 'a', seq: 2, text },
+    { k: 'end', seq: 3, reason: 'completed' },
+  ]) onFrame({ t: 'item', s: c.id, it })
+  await rendered()
+  const msgs = s.els.get('msgs'), toggle = msgs.listeners.toggle[0]
+  assert.equal(toggle.o, true, 'native toggle is captured')
+  const untouched = msgs.innerHTML
+  msgs.dispatch('toggle', { target: { tagName: 'DETAILS', dataset: { resultDetails: '2' }, open: true } })
+  assert.equal(msgs.innerHTML, untouched, 'toggle must not replace the DOM containing players')
+  assert.ok(c.resultOpen.has(2))
+  tapResult(s, '[data-process]', { process: '1' })
+  assert.match(msgs.innerHTML, /data-result-details="2" open>/, 'unrelated redraw restores expansion')
+  const expanded = msgs.innerHTML
+  msgs.dispatch('toggle', { target: { tagName: 'DETAILS', dataset: { resultDetails: '2' }, open: false } })
+  assert.equal(msgs.innerHTML, expanded)
+  assert.ok(!c.resultOpen.has(2))
+  tapResult(s, '[data-process]', { process: '1' })
+  assert.match(msgs.innerHTML, /data-result-details="2">/)
+  let copied
+  s.navigator.clipboard = { writeText: value => { copied = value; return Promise.resolve() } }
+  tapResult(s, '[data-copymsg]', { copymsg: '2' })
+  assert.equal(copied, text)
+})
+
 test('a live turn keeps streamed commentary compact while approval stays visible', async () => {
   const s = bootApp(), c = resultChat(s, 'live-result', true), { onFrame } = s.window.__dsh
   onFrame({ t: 'd', s: c.id, p: [[1, '不要让我读这段流式分析']] })

@@ -238,6 +238,8 @@ bash android/build.sh public          # 编译 App（无 Gradle，需 Android SD
 
 界面文件（`plugin/www/`）保存后即时生效；`index.js` / `server.js` / `fold.js` / `notify.js` 改动后需要重启 DSH。DSH 的线协议笔记见 [docs/dsh-protocol-notes.md](docs/dsh-protocol-notes.md)。
 
+手机和平板的已完成长回复（超过 600 个字符或 12 行）默认显示原文开头的短摘要，点“查看完整结果”展开全部内容；视频卡片和工作区文件的“所在文件夹”入口始终可见。展开状态在当前会话页面内保留，展开/收起不重建播放器，复制仍取完整回复。短回复和出错、停止的结果直接显示。此项仅修改 `/m` 前端，更新界面即可获取，无须重启 DSH 或重新安装 App。
+
 ```
 plugin/     DSH 插件：index.js 挂载 · server.js 接口与实时桥 · fold.js 事件折叠 · notify.js 提醒中枢
             files.js 结果查看器（只读、限工作区）· push.js 网页推送 · commands.js 快捷指令 · www/ 手机界面、Service Worker、Web App 清单
@@ -281,6 +283,7 @@ Together they let you follow sessions, send prompts, and approve or reject tool 
   - A 1,300-line Java shell built without Gradle, with in-app updates served from your own PC.
 - **DSH-only by default.** Only DSH projects and sessions are synced. Claude Code and Codex are an optional, explicit opt-in; see [docs/claude-code-codex.md](docs/claude-code-codex.md).
 - **Persistent video previews.** Every DSH workspace can deliver local video paths as inline players. With FFmpeg, large videos get cached H.264/AAC previews (1280 maximum edge, 30 fps, capped bitrate), with an original-quality switch. Both support HTTP Range seeking, and completed previews survive restarts.
+- **Compact completed results.** Long completed replies show an excerpt with expandable details. Video players and workspace-file folder buttons stay visible; toggling details keeps the player node and copying returns the full reply. Short replies and error/stop results remain fully visible.
 
 Try the UI without DSH: `node plugin/dev.mjs --demo` serves made-up projects and sessions from a fake DSH at http://127.0.0.1:3090/m/ (the screenshots above come from it).
 

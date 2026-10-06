@@ -15,6 +15,7 @@
  * streaming" never duplicates or loses text.
  */
 ;(function () {
+  var loadedUiSource = document.documentElement.outerHTML
   // ------------------------------------------------------------ utilities
   var $ = function (s) { return document.querySelector(s) }
   var ESC = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
@@ -264,7 +265,7 @@
     ws: [], wsById: {}, sessions: [], byId: {}, blanks: {},
     run: new Set(), asks: new Map(), qs: new Map(), chats: new Map(),
     filter: store.get('filter', 'all'), query: '', cur: null, booted: false, hellos: 0,
-    att: [], drafts: store.get('drafts', {}), status: 'connecting',
+    att: [], drafts: store.get('drafts', {}), status: 'connecting', uiUpdate: null,
     agents: { mode: 'auto', away: false, sessions: [] },
   }
   var el = {}
@@ -397,10 +398,11 @@
       return (s.title || '').toLowerCase().indexOf(q) >= 0 || wsTitle(s.w).toLowerCase().indexOf(q) >= 0
     }).sort(function (a, b) { return b.at - a.at })
     var h = ''
+    if (S.uiUpdate) h += '<button class="alert upd" data-ui-update>' + ic('refresh') + '<span>界面有更新，点这里更新</span>' + ic('chev', 's') + '</button>'
     if (S.appUpdate) {
       h += S.appUpdate.self
-        ? '<button class="alert upd" data-update>' + ic('down') + '<span>App 有新版本 ' + esc(S.appUpdate.versionName) + '，点这里更新</span>' + ic('chev', 's') + '</button>'
-        : '<div class="alert upd">' + ic('down') + '<span>App 可以升级到 ' + esc(S.appUpdate.versionName) + '：这一次需要在电脑上安装，之后就能在手机上直接更新</span></div>'
+        ? '<button class="alert upd" data-update>' + ic('down') + '<span>App 安装包有新版本 ' + esc(S.appUpdate.versionName) + '，点这里更新</span>' + ic('chev', 's') + '</button>'
+        : '<div class="alert upd">' + ic('down') + '<span>App 安装包可以升级到 ' + esc(S.appUpdate.versionName) + '：这一次需要在电脑上安装，之后就能在手机上直接更新</span></div>'
     }
     var waiting = S.asks.size + S.qs.size
     if (waiting) {
@@ -1726,6 +1728,7 @@
   }, 10000)
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState !== 'visible') { saveDraft(); return }
+    checkUpdates()
     if (!es || Date.now() - lastBeat > 25000) connect()
     else scheduleHome()
   })
@@ -1736,6 +1739,7 @@
 
   el.rows.addEventListener('click', function (e) {
     if (e.target.closest('[data-mode]')) { modeSheet(); return }
+    if (e.target.closest('[data-ui-update]')) { reloadUi(); return }
     if (e.target.closest('[data-update]')) { buzz(); location.href = 'dshapp://update'; return }
     var b = e.target.closest('[data-open]')
     if (b) openChat(b.dataset.open)
@@ -2053,17 +2057,85 @@
     drawThumbs(); syncSend()
   })
 
-  setInterval(function () { if (!S.cur && document.visibilityState === 'visible') scheduleHome() }, 60000)
+  setInterval(function () {
+    checkUpdates()
+    if (!S.cur && document.visibilityState === 'visible') scheduleHome()
+  }, 60000)
+  window.addEventListener('online', checkUpdates)
 
   // ------------------------------------------------------------ Android shell hooks
   // In-app update: the shell reports "DSHApp/<version>+<code>" (1.3.0+); older shells
   // cannot update themselves and only get a hint.
   var APP_CODE = +((/DSHApp\/[\d.]+\+(\d+)/.exec(navigator.userAgent) || [])[1] || 0)
-  function checkAppUpdate() {
-    if (!IN_APP) return
-    get('/m/api/app/latest').then(function (v) {
-      if (APP_CODE ? v.versionCode > APP_CODE : true) { S.appUpdate = { versionName: v.versionName, self: APP_CODE > 0 }; scheduleHome() }
-    }, function () {})
+  function checkAppUpdate(signal) {
+    return fetch('/m/api/app/latest', { cache: 'no-store', redirect: 'manual', signal: signal }).then(function (r) {
+      if (r.status !== 200 || signal.aborted) return
+      return r.json().then(function (j) {
+        var v = j && j.ok && j.value
+        if (!signal.aborted && v && (APP_CODE ? v.versionCode > APP_CODE : true)) {
+          S.appUpdate = { versionName: v.versionName, self: APP_CODE > 0 }; scheduleHome()
+        }
+      })
+    })
+  }
+  function uiHtml(source) {
+    try {
+      var d = new DOMParser().parseFromString(source, 'text/html')
+      var manifest = d.querySelector('link[rel="manifest"]'), style = d.querySelector('head > style'), script = d.querySelector('body > script')
+      if (d.title !== 'DSH' || !manifest || manifest.getAttribute('href') !== '/m/manifest.webmanifest' || d.querySelectorAll('#app').length !== 1 ||
+        !d.querySelector('#app > section#home #rows') || !d.querySelector('#app > section#chat #msgs') ||
+        !d.querySelector('#app > section#chat textarea#input') || !d.querySelector('#app > section#chat button#send') ||
+        !style || !style.textContent.trim() || !script || script.getAttribute('src') || !script.textContent.trim()) return null
+      // The inline script runs before the parser consumes the body tail. Only
+      // structural whitespace is normalized; script/style/textarea text stays exact.
+      ;[d.documentElement, d.head, d.body].forEach(function (node) {
+        Array.prototype.slice.call(node.childNodes).forEach(function (child) {
+          if (child.nodeType === 3 && !child.nodeValue.trim()) node.removeChild(child)
+        })
+      })
+      return d.documentElement.outerHTML
+    } catch (e) { return null }
+  }
+  var loadedUiHtml = uiHtml(loadedUiSource), seenUiEtag = null, uiChecked = false
+  var updateAt = -Infinity, updateFlight = null
+  function uiResponse(r) {
+    return r.status === 200 && !r.redirected && r.type !== 'opaqueredirect' && /^text\/html(?:\s*;|$)/i.test(r.headers.get('Content-Type') || '')
+  }
+  function checkUiUpdate(signal) {
+    function compareHtml() {
+      return fetch('/m/', { method: 'GET', cache: 'no-store', redirect: 'manual', signal: signal }).then(function (r) {
+        if (signal.aborted || !uiResponse(r)) return
+        return r.text().then(function (source) {
+          if (signal.aborted) return
+          var html = uiHtml(source)
+          if (!html) return
+          seenUiEtag = r.headers.get('ETag')
+          var next = html === loadedUiHtml ? null : true
+          if (S.uiUpdate !== next) { S.uiUpdate = next; scheduleHome() }
+        })
+      })
+    }
+    if (!uiChecked) { uiChecked = true; return compareHtml() }
+    return fetch('/m/', { method: 'HEAD', cache: 'no-store', redirect: 'manual', signal: signal }).then(function (r) {
+      if (signal.aborted || !uiResponse(r)) return
+      var etag = r.headers.get('ETag')
+      if (!etag || etag !== seenUiEtag) return compareHtml()
+    })
+  }
+  function checkUpdates() {
+    if (document.visibilityState !== 'visible' || navigator.onLine === false) return
+    if (updateFlight) return updateFlight
+    if (Date.now() - updateAt < 60000 || (!loadedUiHtml && !IN_APP)) return
+    updateAt = Date.now()
+    var controller = new AbortController(), checks = []
+    var timer = setTimeout(function () { controller.abort() }, 8000)
+    // Update probes stay outside handle(): login/gateway failures must not reload a playing page.
+    if (loadedUiHtml) checks.push(checkUiUpdate(controller.signal))
+    if (IN_APP) checks.push(checkAppUpdate(controller.signal))
+    updateFlight = Promise.all(checks.map(function (check) { return check.catch(function () {}) })).then(function () {
+      clearTimeout(timer); updateFlight = null
+    })
+    return updateFlight
   }
   window.dshToast = function (msg, kind) { toast(msg, kind) }
 
@@ -2121,6 +2193,6 @@
   if (cached && cached.sessions) { try { applyBoot(cached); S.run = new Set() } catch (e) {} }
   renderHome()
   loadBoot().then(function () { if (deep && (S.byId[deep] || isAgent(deep))) openChat(deep) }, function (e) { toast(e.message, 'err') })
-  checkAppUpdate()
+  checkUpdates()
   connect()
 })()

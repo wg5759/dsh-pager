@@ -16,6 +16,39 @@ import { fileURLToPath } from 'node:url'
 
 const APP = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'www', 'app.js'), 'utf8')
 
+// Controlled DOMParser documents: structural whitespace is separate from
+// inline source text, as in a real parsed document. Browser acceptance is separate.
+const UI_DOCUMENTS = new Map()
+function uiShell({ css = 'body { color: black; }', js = 'window.fixture = 1;', content = '', title = 'DSH', marker = true } = {}) {
+  const core = '<html><head><title>' + title + '</title><link rel="manifest" href="/m/manifest.webmanifest"><style>' + css + '</style></head><body><div id="' + (marker ? 'app' : 'gateway') + '"><section id="home"><div id="rows"></div></section><section id="chat"><div id="msgs"></div><textarea id="input"></textarea><button id="send"></button></section>' + content + '</div><script>' + js + '</script>'
+  const fixture = { core, title, marker, css, js, snapshot: core + '</body></html>', html: '<!doctype html>\n' + core + '\n</body>\n</html>' }
+  UI_DOCUMENTS.set(fixture.snapshot, { fixture, tail: '' })
+  UI_DOCUMENTS.set(fixture.html, { fixture, tail: '\n' })
+  return fixture
+}
+const UI_BASE = uiShell(), UI_NEW = uiShell({ css: 'body { color: blue; }' })
+function parsedShell(source) {
+  const { fixture, tail } = UI_DOCUMENTS.get(source) || { fixture: { core: '<html><head></head><body>invalid', title: '', marker: false, css: '', js: '' }, tail: '' }
+  const container = (children) => ({ childNodes: children, removeChild(child) { this.childNodes.splice(this.childNodes.indexOf(child), 1) } })
+  const body = container(tail ? [{ nodeType: 1 }, { nodeType: 3, nodeValue: tail }] : [{ nodeType: 1 }])
+  const head = container([{ nodeType: 1 }]), documentElement = container([head, body])
+  head.nodeType = body.nodeType = 1
+  Object.defineProperty(documentElement, 'outerHTML', { get: () => fixture.core + body.childNodes.filter(n => n.nodeType === 3).map(n => n.nodeValue).join('') + '</body></html>' })
+  return { title: fixture.title, head, body, documentElement,
+    querySelectorAll: selector => selector === '#app' && fixture.marker ? [{}] : [],
+    querySelector(selector) {
+      if (!fixture.marker) return null
+      if (selector === 'link[rel="manifest"]') return { getAttribute: name => name === 'href' ? '/m/manifest.webmanifest' : null }
+      if (selector === 'head > style') return { textContent: fixture.css }
+      if (selector === 'body > script') return { textContent: fixture.js, getAttribute: () => null }
+      return ['#app > section#home #rows', '#app > section#chat #msgs', '#app > section#chat textarea#input', '#app > section#chat button#send'].includes(selector) ? {} : null
+    },
+  }
+}
+const shellResponse = (fixture = UI_BASE, etag = '"base"', status = 200, type = 'text/html; charset=utf-8') => ({ status,
+  headers: { get: name => ({ etag, 'content-type': type })[name.toLowerCase()] ?? null }, text: () => Promise.resolve(fixture.html),
+})
+
 /** Just enough element for app.js's rendering and input paths. */
 function makeEl(tag = 'div', id = '') {
   const listeners = {}
@@ -59,25 +92,29 @@ function makeEl(tag = 'div', id = '') {
  * @param {{search?: string}} opts - `?debug` exposes window.__dsh.
  * @returns the sandbox, with `sandbox.window.__dsh` populated.
  */
-function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { accepted: true } }), readResult, agentsResult } = {}) {
+function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { accepted: true } }), readResult, agentsResult, loadedHtml = UI_BASE.snapshot, liveHtml, uiResult, appLatestResult, userAgent = 'test', visibility = 'visible', online = true } = {}) {
   const byId = new Map()
   const store = new Map()
   /** Every /m/api/rpc call the page makes, so tests can assert the wire call. */
   const rpcCalls = []
   const readCalls = []
+  const uiCalls = [], headCalls = [], uiGetCalls = [], parseCalls = [], appLatestCalls = [], intervals = [], timeouts = new Map()
+  let now = Date.now(), timerId = 0, reloads = 0
+  class Clock extends Date { constructor(...args) { super(...(args.length ? args : [now])) } static now() { return now } }
   const windowEvents = new Map(), documentEvents = new Map()
   const doc = {
     getElementById(id) { if (!byId.has(id)) byId.set(id, makeEl('div', id)); return byId.get(id) },
     createElement(tag) { return makeEl(tag) },
-    querySelector() { return null }, querySelectorAll() { return [] },
+    querySelector() { return null }, querySelectorAll(selector) { if (selector === '[data-ic]' && liveHtml) doc.documentElement.outerHTML = liveHtml; return [] },
     addEventListener(t, fn) { if (!documentEvents.has(t)) documentEvents.set(t, []); documentEvents.get(t).push(fn) }, removeEventListener() {},
     documentElement: makeEl('html'), head: makeEl('head'), body: makeEl('body'),
-    activeElement: null,
+    activeElement: null, visibilityState: visibility,
   }
+  doc.documentElement.outerHTML = loadedHtml
   const sandbox = {
     document: doc,
-    navigator: { userAgent: 'test', maxTouchPoints: 0, standalone: false, onLine: true, serviceWorker: { register: () => Promise.resolve({}), addEventListener() {} }, vibrate() {} },
-    location: { pathname: '/m/', hash: '', search, href: 'https://example.test/m/' + search, replace() {} },
+    navigator: { userAgent, maxTouchPoints: 0, standalone: false, onLine: online, serviceWorker: { register: () => Promise.resolve({}), addEventListener() {} }, vibrate() {} },
+    location: { pathname: '/m/', hash: '', search, href: 'https://example.test/m/' + search, replace() {}, reload() { reloads++ } },
     history: { state: null, pushState() {}, replaceState() {}, go() {}, back() {} },
     localStorage: { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) },
     matchMedia: () => ({ matches: false, addEventListener() {}, addListener() {} }),
@@ -86,10 +123,20 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
     // The page keeps a reconnect loop and streaming timers alive; a booted
     // sandbox must be inert or the test run never exits. Frame and reconnect
     // timers are driven explicitly by the test through onFrame.
-    setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+    setTimeout(fn, ms) { timeouts.set(++timerId, { fn, ms }); return timerId }, clearTimeout(id) { timeouts.delete(id) },
+    setInterval(fn, ms) { intervals.push({ fn, ms }); return intervals.length }, clearInterval() {},
     // Startup calls fail fast (keeping the sandbox quiet) while RPC posts are
     // recorded, so a test can assert which method the UI actually sent.
     fetch: (url, opts) => {
+      if (String(url) === '/m/') {
+        const call = { url: String(url), opts }
+        uiCalls.push(call); (opts.method === 'HEAD' ? headCalls : uiGetCalls).push(call)
+        return Promise.resolve().then(() => uiResult ? uiResult(call) : shellResponse())
+      }
+      if (String(url) === '/m/api/app/latest') {
+        appLatestCalls.push({ url: String(url), opts })
+        return Promise.resolve().then(() => appLatestResult ? appLatestResult(appLatestCalls.at(-1)) : { status: 200, json: () => Promise.resolve({ ok: true, value: { versionName: '1.3.2', versionCode: 132 } }) })
+      }
       if (String(url) === '/m/api/agents' && agentsResult) return Promise.resolve({ status: 200, json: () => Promise.resolve({ ok: true, value: agentsResult }) })
       if (String(url).indexOf('/m/api/rpc') >= 0 && opts && opts.body) {
         try { rpcCalls.push(JSON.parse(opts.body)) } catch { rpcCalls.push({ raw: opts.body }) }
@@ -103,11 +150,12 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
     },
     URL: { createObjectURL: () => 'blob:x', revokeObjectURL() {} },
     Image: class { },
+    DOMParser: class { parseFromString(source, type) { parseCalls.push({ source, type }); assert.equal(type, 'text/html'); return parsedShell(source) } },
     crypto: { randomUUID: () => '00000000-0000-4000-8000-000000000000', getRandomValues: (a) => a },
     EventSource: class { constructor() { this.readyState = 0 } close() {} },
     addEventListener(t, fn) { if (!windowEvents.has(t)) windowEvents.set(t, []); windowEvents.get(t).push(fn) }, removeEventListener() {},
     console,
-    JSON, Math, Date, Set, Map, Array, Object, String, Number, Boolean, Promise, Error, RegExp, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
+    JSON, Math, Date: Clock, Set, Map, Array, Object, String, Number, Boolean, Promise, Error, RegExp, AbortController, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
   }
   sandbox.window = sandbox
   sandbox.globalThis = sandbox
@@ -119,6 +167,11 @@ function bootApp({ search = '?debug', rpcResult = () => ({ ok: true, value: { ac
   sandbox.els = byId
   sandbox.dispatchWindow = (t, event) => (windowEvents.get(t) || []).forEach(fn => fn(event))
   sandbox.dispatchDocument = (t, event) => (documentEvents.get(t) || []).forEach(fn => fn(event))
+  sandbox.uiCalls = uiCalls; sandbox.headCalls = headCalls; sandbox.uiGetCalls = uiGetCalls; sandbox.parseCalls = parseCalls; sandbox.appLatestCalls = appLatestCalls
+  sandbox.advance = (ms) => { now += ms }
+  sandbox.runInterval = (ms) => intervals.filter(timer => timer.ms === ms).forEach(timer => timer.fn())
+  sandbox.fireTimeouts = (ms) => { for (const [id, timer] of timeouts) if (timer.ms === ms) { timeouts.delete(id); timer.fn() } }
+  sandbox.reloadCount = () => reloads
   return sandbox
 }
 
@@ -393,6 +446,170 @@ function tapResult(s, selector, dataset) {
   s.els.get('scroller').dispatch('click', { target: { closest: sel => sel === selector ? { dataset } : null }, preventDefault() {} })
 }
 const rendered = () => new Promise(r => setTimeout(r, 10))
+
+const latestResponse = () => ({ status: 200, json: () => Promise.resolve({ ok: true, value: { versionName: '1.4.0', versionCode: 140 } }) })
+const tapUiUpdate = s => s.els.get('rows').dispatch('click', { target: { closest: selector => selector === '[data-ui-update]' ? {} : null } })
+
+for (const [kind, remote] of [['CSS', UI_NEW], ['JS', uiShell({ js: 'window.fixture = 2;' })], ['HTML', uiShell({ content: '<aside>new content</aside>' })]]) {
+  test(`existing-server ${kind} changes are discovered without a revision meta or custom header`, async () => {
+    const s = bootApp({ uiResult: () => shellResponse(remote, '"new"') })
+    s.window.__dsh.S.booted = true
+    await rendered()
+    assert.equal(s.uiGetCalls.length, 1)
+    assert.equal(s.headCalls.length, 0, 'startup compares HTML before using HEAD shortcuts')
+    assert.equal(s.uiGetCalls[0].opts.method, 'GET')
+    assert.equal(s.uiGetCalls[0].opts.cache, 'no-store')
+    assert.equal(s.uiGetCalls[0].opts.redirect, 'manual')
+    assert.equal(s.window.__dsh.S.uiUpdate, true)
+    assert.match(s.els.get('rows').innerHTML, /界面有更新，点这里更新/)
+    assert.equal(s.appLatestCalls.length, 0)
+    assert.equal(s.reloadCount(), 0)
+  })
+}
+
+test('HTML comparison normalizes parser-tail whitespace and keeps the pre-mutation loaded snapshot', async () => {
+  const live = uiShell({ content: '<p>runtime conversation DOM</p>' })
+  const s = bootApp({ liveHtml: live.snapshot })
+  await rendered()
+  assert.equal(s.uiGetCalls.length, 1)
+  assert.ok(!s.window.__dsh.S.uiUpdate, 'identical shell with parser-added tail whitespace is not an update')
+  assert.equal(s.document.documentElement.outerHTML, live.snapshot)
+  assert.ok(s.parseCalls.some(call => call.source === UI_BASE.snapshot), 'normalization uses the snapshot captured before page mutations')
+  assert.ok(!s.parseCalls.some(call => call.source === live.snapshot), 'runtime DOM must never become the loaded baseline')
+})
+
+test('unchanged ETag costs only HEAD and changed ETag compares GET HTML using the GET response ETag', async () => {
+  let etag = '"base"'
+  const s = bootApp({ uiResult: ({ opts }) => shellResponse(UI_BASE, opts.method === 'GET' && etag === '"head-B"' ? '"get-C"' : etag) })
+  await rendered()
+  s.advance(60000); s.runInterval(60000); await rendered()
+  assert.equal(s.headCalls.length, 1); assert.equal(s.uiGetCalls.length, 1)
+  etag = '"head-B"'; s.advance(60000); s.dispatchWindow('online'); await rendered()
+  assert.equal(s.uiGetCalls.length, 2)
+  assert.ok(!s.window.__dsh.S.uiUpdate, 'ETag alone does not prove different normalized HTML')
+  etag = '"get-C"'; s.advance(60000); s.dispatchWindow('online'); await rendered()
+  assert.equal(s.headCalls.length, 3); assert.equal(s.uiGetCalls.length, 2, 'remember the GET ETag, not the earlier HEAD ETag')
+})
+
+test('login, gateway, wrong MIME and invalid shell responses neither raise nor clear UI reminders', async () => {
+  const invalid = [shellResponse(UI_NEW, '"bad"', 401), { status: 0, type: 'opaqueredirect' }, shellResponse(UI_NEW, '"bad"', 503),
+    shellResponse(UI_NEW, '"bad"', 200, 'text/plain'), shellResponse(uiShell({ title: 'Login' }), '"bad"'), shellResponse(uiShell({ marker: false }), '"bad"')]
+  for (const reply of invalid) {
+    const s = bootApp({ uiResult: () => reply })
+    await rendered(); assert.ok(!s.window.__dsh.S.uiUpdate); assert.equal(s.reloadCount(), 0)
+  }
+  let reply = shellResponse(UI_NEW, '"new"')
+  const s = bootApp({ uiResult: () => reply })
+  await rendered()
+  const toast = s.els.get('toast').textContent, status = s.window.__dsh.S.status
+  for (const failure of invalid) {
+    reply = failure; s.advance(60000); s.dispatchWindow('online'); await rendered()
+    assert.equal(s.window.__dsh.S.uiUpdate, true)
+    assert.equal(s.els.get('toast').textContent, toast); assert.equal(s.window.__dsh.S.status, status); assert.equal(s.reloadCount(), 0)
+  }
+  reply = shellResponse(UI_BASE, '"bad"'); s.advance(60000); s.dispatchWindow('online'); await rendered()
+  assert.equal(s.window.__dsh.S.uiUpdate, null, 'failed GETs did not commit the observed HEAD ETag; the same ETag can be retried')
+})
+
+test('UI and APK failures recover together and keep distinct home actions', async () => {
+  let fail = true
+  const s = bootApp({ userAgent: 'DSHApp/1.3.2+132', uiResult: () => fail ? Promise.reject(new Error('offline')) : shellResponse(UI_NEW, '"new"'),
+    appLatestResult: () => fail ? Promise.reject(new Error('offline')) : latestResponse() })
+  s.window.__dsh.S.booted = true
+  await rendered()
+  assert.equal(s.uiGetCalls.length, 1); assert.equal(s.appLatestCalls.length, 1)
+  fail = false; s.advance(60000); s.dispatchWindow('online'); await rendered()
+  assert.equal(s.uiGetCalls.length, 2); assert.equal(s.appLatestCalls.length, 2)
+  assert.equal(s.window.__dsh.S.uiUpdate, true)
+  assert.equal(s.window.__dsh.S.appUpdate.versionName, '1.4.0')
+  assert.match(s.els.get('rows').innerHTML, /界面有更新，点这里更新/)
+  assert.match(s.els.get('rows').innerHTML, /App 安装包有新版本/)
+  assert.equal(s.reloadCount(), 0); assert.ok(!s.location.href.startsWith('dshapp:'))
+})
+
+test('HTML probes share in-flight work across lifecycle events and one 60 second throttle', async () => {
+  let first
+  const s = bootApp({ uiResult: ({ opts }) => opts.method === 'GET' ? new Promise(resolve => { first = resolve }) : shellResponse() })
+  await rendered(); s.advance(120000)
+  s.dispatchWindow('online'); s.dispatchDocument('visibilitychange'); s.runInterval(60000)
+  assert.equal(s.uiCalls.length, 1, 'a slow request crossing the throttle window still cannot overlap')
+  first(shellResponse()); await rendered()
+  s.dispatchWindow('online'); s.dispatchDocument('visibilitychange'); s.runInterval(60000); await rendered()
+  assert.equal(s.uiCalls.length, 2)
+  s.advance(59999); s.dispatchWindow('online'); s.runInterval(60000); assert.equal(s.uiCalls.length, 2)
+  s.advance(1); s.runInterval(60000); await rendered()
+  assert.equal(s.uiCalls.length, 3); assert.equal(s.uiGetCalls.length, 1)
+})
+
+test('HTML and APK update checks wait while hidden or offline and resume visibly online', async () => {
+  for (const initial of [{ visibility: 'hidden' }, { online: false }]) {
+    const s = bootApp({ ...initial, userAgent: 'DSHApp/1.3.2+132', uiResult: () => shellResponse(UI_NEW, '"new"') })
+    await rendered(); s.dispatchWindow('online'); s.runInterval(60000); await rendered()
+    assert.equal(s.uiCalls.length, 0); assert.equal(s.appLatestCalls.length, 0)
+    s.document.visibilityState = 'visible'; s.navigator.onLine = true
+    s.dispatchDocument('visibilitychange'); await rendered()
+    assert.equal(s.uiGetCalls.length, 1); assert.equal(s.appLatestCalls.length, 1)
+  }
+})
+
+test('rollback to the fixed loaded HTML clears the reminder but errors retain it and unchanged state does not repaint', async () => {
+  let reply = shellResponse(UI_NEW, '"new"')
+  const s = bootApp({ uiResult: () => reply }); const S = s.window.__dsh.S
+  S.booted = true; await rendered(); assert.equal(S.uiUpdate, true)
+  reply = shellResponse(UI_BASE, '"rollback"'); s.advance(60000); s.dispatchWindow('online'); await rendered()
+  assert.equal(S.uiUpdate, null); assert.ok(!s.els.get('rows').innerHTML.includes('data-ui-update'))
+  let html = s.els.get('rows').innerHTML, writes = 0
+  Object.defineProperty(s.els.get('rows'), 'innerHTML', { configurable: true, get: () => html, set(value) { html = value; writes++ } })
+  s.advance(60000); s.dispatchWindow('online'); await rendered(); assert.equal(writes, 0)
+  reply = shellResponse(UI_NEW, '"new-again"'); s.advance(60000); s.dispatchWindow('online'); await rendered()
+  assert.equal(S.uiUpdate, true, 'the baseline was not replaced by a previously fetched new shell'); assert.equal(writes, 1)
+  s.advance(60000); s.dispatchWindow('online'); await rendered(); assert.equal(writes, 1); assert.equal(s.reloadCount(), 0)
+})
+
+test('the home UI update action reuses draft, pending queue and unsent-image reload protection', async () => {
+  const s = bootApp({ uiResult: () => shellResponse(UI_NEW, '"new"') }), c = resultChat(s)
+  const S = s.window.__dsh.S, replaces = []
+  s.history.replaceState = (...args) => replaces.push(args)
+  s.els.get('input').value = '返回首页前未发送的草稿'; s.dispatchWindow('popstate', { state: { v: 'home' } })
+  S.booted = true; await rendered(); assert.equal(S.cur, null); assert.equal(S.drafts[c.id], '返回首页前未发送的草稿')
+  c.queueBusy = { m1: true }; tapUiUpdate(s); assert.equal(s.reloadCount(), 0); assert.match(s.els.get('toast').textContent, /处理中/)
+  c.queueBusy = {}; S.att = [{}]; tapUiUpdate(s); assert.equal(s.reloadCount(), 0); assert.match(s.els.get('toast').textContent, /图片/)
+  S.att = []; tapUiUpdate(s); assert.equal(s.reloadCount(), 1)
+  assert.equal(S.drafts[c.id], '返回首页前未发送的草稿'); assert.equal(replaces.at(-1)[2], '/m/')
+})
+
+test('a changed HTML response during playback leaves the actual message player and conversation untouched', async () => {
+  let reply
+  const s = bootApp({ uiResult: () => new Promise(resolve => { reply = resolve }) }), c = resultChat(s), dom = installVideoDom(s)
+  twoVideoTurns(s, c, s.window.__dsh.onFrame); await rendered()
+  const v = dom.videos()[1]
+  v.currentTime = 8.3; v.paused = false; v._fullscreen = true; v.src = '/unchanged-player'; v.dataset.quality = 'original'
+  assert.equal(typeof reply, 'function', 'the initial HTML comparison requested the existing resource')
+  reply(shellResponse(UI_NEW, '"new"')); await rendered()
+  assert.equal(s.window.__dsh.S.uiUpdate, true); assert.equal(dom.videos()[1], v)
+  assert.equal(v.currentTime, 8.3); assert.equal(v.paused, false); assert.equal(v._fullscreen, true)
+  assert.equal(v.src, '/unchanged-player'); assert.equal(v.dataset.quality, 'original'); assert.equal(v.playCalls, 0)
+  assert.equal(s.window.__dsh.S.cur, c.id); assert.equal(s.reloadCount(), 0)
+})
+
+test('a timed out HTML probe releases its gate for the next bounded check', async () => {
+  let attempts = 0
+  const s = bootApp({ uiResult: ({ opts }) => ++attempts === 1
+    ? new Promise((resolve, reject) => opts.signal.addEventListener('abort', () => reject(new Error('aborted')))) : shellResponse(UI_NEW, '"new"') })
+  await rendered(); assert.equal(s.uiGetCalls.length, 1)
+  s.fireTimeouts(8000); await rendered(); assert.equal(s.uiGetCalls[0].opts.signal.aborted, true)
+  s.advance(60000); s.dispatchWindow('online'); await rendered()
+  assert.equal(s.uiGetCalls.length, 2); assert.equal(s.window.__dsh.S.uiUpdate, true); assert.equal(s.reloadCount(), 0)
+})
+
+test('missing ETag keeps comparison available instead of becoming an update marker', async () => {
+  let remote = UI_BASE
+  const s = bootApp({ uiResult: () => shellResponse(remote, null) })
+  await rendered(); assert.ok(!s.window.__dsh.S.uiUpdate)
+  remote = UI_NEW; s.advance(60000); s.dispatchWindow('online'); await rendered()
+  assert.equal(s.headCalls.length, 1); assert.equal(s.uiGetCalls.length, 2)
+  assert.equal(s.window.__dsh.S.uiUpdate, true)
+})
 
 test('completed turns show the final result and keep commentary and tools behind one process', async () => {
   const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh

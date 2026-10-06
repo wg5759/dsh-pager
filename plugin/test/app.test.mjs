@@ -530,6 +530,113 @@ test('a file path opens its parent folder and highlights the delivered file', as
   assert.ok(!s.els.get('fvBody').innerHTML.includes('文件内容'))
 })
 
+test('result paths reject commands, domains and slash prose while keeping explicit files and directories', async () => {
+  const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh
+  const noise = ['begin.py --help', 'cp.kuaishou.com', 'cp.kuaishou.com/upload.mp4', 'acquire',
+    'acquire/preflight.py/原生检查', '下载/预览', '3/≤3', '≤3', '3', '不存在假文本', 'python tools/preflight.py',
+    'D:/视频项目/tools/preflight.py acquire', 'tools/preflight.py acquire']
+  const text = '这是路径识别检查。\n\n' + noise.map(x => '`' + x + '`').join('\n') + '\n' +
+    '普通文本 acquire/preflight.py/原生检查\n普通命令 python tools/preflight.py\n相对命令 tools/begin.py --help\n无参数名命令 tools/preflight.py acquire\n' +
+    '[相对文件](delivery/说明.md)\n[目录](delivery/)\n[证据目录](evidence/Bjoint/)\n[明确目录](./Bjoint)\n' +
+    '[安装包](delivery/DSH.apk)\n[文档](delivery/审片.pdf)\n' +
+    '[中文视频](<D:/视频项目/交付/真实 成片.mp4>)\n' +
+    '[工作区外](<D:/别的项目/不可访问.mp4>)\n' +
+    '[bad](javascript:alert(1)) <img onerror=alert(1)>'
+  onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 1, text } })
+  onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 2, reason: 'completed' } })
+  await rendered()
+  const html = s.els.get('msgs').innerHTML
+  const paths = [...html.matchAll(/data-(?:result-path|open-video|artifact)="([^"]+)"/g)].map(m => m[1])
+  assert.deepEqual([...new Set(paths)].sort(), ['delivery/说明.md', 'delivery/', 'evidence/Bjoint/', './Bjoint', 'delivery/DSH.apk', 'delivery/审片.pdf', 'D:/视频项目/交付/真实 成片.mp4'].sort())
+  for (const n of noise) assert.ok(html.includes(n), 'unrecognized expressions remain text: ' + n)
+  assert.ok(!html.includes('<img onerror='))
+  assert.ok(!html.includes('href="javascript:'))
+  assert.equal(s.readCalls.length, 0, 'recognition does not probe filesystem per log token')
+  assert.equal(s.rpcCalls.length, 0)
+})
+
+test('one message deduplicates Windows slash, case and workspace-relative video paths', async () => {
+  const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh
+  const text = '[A](<D:/视频项目/交付/成片 01.mp4>)\n' +
+    '[B](<d:\\视频项目\\交付\\成片 01.MP4>)\n' +
+    '[C](<交付/成片 01.mp4>)\n[同一文件](<./交付/成片 01.mp4>)\n' +
+    '[说明一](<D:/视频项目/交付/说明.md>)\n[说明二](<交付\\说明.MD>)\n\n' + '详细说明'.repeat(160)
+  onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 1, text } })
+  onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 2, reason: 'completed' } })
+  await rendered()
+  const html = s.els.get('msgs').innerHTML
+  assert.equal((html.match(/<video /g) || []).length, 1)
+  assert.equal((html.match(/class="artifact artifact-file"/g) || []).length, 1)
+  const links = [...html.matchAll(/data-open-video="([^"]+)"/g)].map(m => m[1])
+  assert.deepEqual([...new Set(links)], ['D:/视频项目/交付/成片 01.mp4'], 'all aliases target the first registered player')
+})
+
+test('POSIX result path deduplication preserves case-sensitive filenames', async () => {
+  const s = bootApp(), c = resultChat(s), { S, onFrame } = s.window.__dsh
+  S.wsById[c.w].path = '/workspace/video'
+  const text = '[大写文件](/workspace/video/delivery/A.mp4)\n' +
+    '[小写文件](delivery/a.mp4)\n[大写别名](./delivery/A.mp4)'
+  onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 1, text } })
+  onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 2, reason: 'completed' } })
+  await rendered()
+  const html = s.els.get('msgs').innerHTML
+  assert.equal((html.match(/<video /g) || []).length, 2)
+  const links = [...html.matchAll(/data-open-video="([^"]+)"/g)].map(m => m[1])
+  assert.deepEqual([...new Set(links)], ['/workspace/video/delivery/A.mp4', 'delivery/a.mp4'])
+})
+
+test('a code basename is text beside the delivered absolute path, not a second root file', async () => {
+  const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh
+  const text = '成片 `clip-B-craft-answer-v4.mp4`\n' +
+    '[成片路径](<D:/视频项目/_验收/delivery/clip-B-craft-answer-v4.mp4>)\n' +
+    '`py.exe` 和 `manifest.json` 只是文件名说明。\n\n' + '详细说明'.repeat(160)
+  onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 1, text } })
+  onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 2, reason: 'completed' } })
+  await rendered()
+  const html = s.els.get('msgs').innerHTML
+  assert.match(html, /<code>clip-B-craft-answer-v4.mp4<\/code>/)
+  assert.match(html, /<code>py.exe<\/code>/)
+  assert.match(html, /<code>manifest.json<\/code>/)
+  assert.equal((html.match(/<video /g) || []).length, 1)
+  assert.equal((html.match(/class="artifact artifact-file"/g) || []).length, 0)
+  assert.equal(s.readCalls.length, 0)
+})
+
+test('explicit Markdown root filenames work and same basenames in distinct paths stay distinct', async () => {
+  const s = bootApp(), c = resultChat(s), { onFrame } = s.window.__dsh
+  const text = '[根内目标](clip.mp4)\n[另一目录](delivery/clip.mp4)\n' +
+    '[同一根内目标](<D:/视频项目/clip.mp4>)\n[说明](report.json)'
+  onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 1, text } })
+  onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 2, reason: 'completed' } })
+  await rendered()
+  const html = s.els.get('msgs').innerHTML
+  assert.equal((html.match(/<video /g) || []).length, 2)
+  assert.match(html, /data-open-video="clip.mp4"/)
+  assert.match(html, /data-open-video="delivery\/clip.mp4"/)
+  assert.match(html, /data-result-path="report.json"/)
+})
+
+test('explicit directory clicks remain supported and missing paths are only checked on demand', async () => {
+  const s = bootApp({ readResult: url => {
+    const p = new URL(url, 'http://test').searchParams.get('path')
+    return p === 'delivery/'
+      ? { ok: true, value: { kind: 'dir', rel: 'delivery', entries: [] } }
+      : { ok: false, error: { message: '文件不存在' } }
+  } }), c = resultChat(s), { onFrame } = s.window.__dsh
+  onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 1, text: '[目录](delivery/)\n[未核验文件](delivery/missing.md)' } })
+  onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 2, reason: 'completed' } })
+  await rendered()
+  assert.equal(s.readCalls.length, 0)
+  tapResult(s, '[data-result-path]', { resultPath: 'delivery/' })
+  await rendered()
+  assert.match(s.els.get('fvBody').innerHTML, /空文件夹/)
+  tapResult(s, '[data-result-path]', { resultPath: 'delivery/missing.md' })
+  await rendered()
+  assert.match(s.els.get('fvBody').innerHTML, /打不开/)
+  assert.match(s.els.get('fvBody').innerHTML, /文件不存在/)
+  assert.equal(s.readCalls.length, 2)
+})
+
 test('updating the UI preserves the text draft and current conversation', () => {
   const s = bootApp(), c = resultChat(s), replaces = []
   let reloads = 0

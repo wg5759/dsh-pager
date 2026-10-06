@@ -108,6 +108,10 @@
   // ------------------------------------------------------------ markdown
   // Escape first, then add a closed set of constructs; raw HTML never passes.
   var LI = /^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$/
+  // A relative name is evidence of a file only for familiar file extensions.
+  // Directories need an explicit ./ prefix or trailing separator. Uncertain
+  // expressions stay text; existence is checked only when the user opens one.
+  var FILE_NAME = /\.(?:mp4|m4v|webm|mov|mp3|m4a|aac|wav|ogg|flac|png|jpe?g|gif|webp|bmp|svg|ico|avif|pdf|docx?|xlsx?|pptx?|csv|tsv|txt|md|html?|json|jsonl|ya?ml|toml|xml|srt|vtt|ass|zip|7z|tar|gz|apk|exe|msi|py|js|mjs|cjs|jsx|ts|tsx|css|sql|sh|ps1|bat|cmd|log)$/i
   function localPath(p) {
     p = String(p || '').trim().replace(/^<|>$/g, '').replace(/^`|`$/g, '')
     if (/^file:\/\/\//i.test(p)) p = p.replace(/^file:\/\/\//i, '/')
@@ -115,27 +119,39 @@
     try { p = decodeURIComponent(p) } catch (e) { return null }
     p = p.replace(/^\/([a-z]:[\\/])/i, '$1').replace(/:\d+(?::\d+)?$/, '')
     if (!p || /[\x00-\x1f<>"|?*]/.test(p) || /^(?:[\\/]{2})/.test(p)) return null
-    if (!/^(?:[a-z]:[\\/]|\/|\.{1,2}[\\/])/i.test(p) && !/[\\/]|\.[a-z0-9]{1,8}$/i.test(p)) return null
     if (/(^|[\\/])\.\.([\\/]|$)/.test(p)) return null
+    if (/\s+-{1,2}\S|\s*(?:&&|\|\||;)|\.(?:py|js|mjs|cjs|ps1|bat|cmd|sh|exe)\s+\S/i.test(p) || /^(?:node|python(?:\d+(?:\.\d+)*)?|pwsh|powershell|bash|sh|npm|npx|ffmpeg|ffprobe)\s/i.test(p)) return null
+    if (!/^(?:[a-z]:[\\/]|\/)/i.test(p)) {
+      if (/^[^\\/\s]+\.(?:com|cn|net|org|io|ai|gov|edu|co|app|dev|test)(?:[\\/]|$)/i.test(p)) return null
+      if (!/^\.[\\/]/.test(p) && !/[\\/]$/.test(p) && !FILE_NAME.test(p)) return null
+    }
     return p
   }
   function videoPath(p) { return /\.(mp4|m4v|webm|mov)$/i.test(p) }
-  function pathLink(p, label, ctx) {
+  function resultPathKey(p, root) {
+    var full = /^[a-z]:[\\/]|^[\\/]/i.test(p) ? p : String(root).replace(/[\\/]+$/, '') + '/' + p.replace(/^\.[\\/]/, '')
+    var key = full.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/\.(?=\/|$)/g, '').replace(/\/+$/, '')
+    return /^[a-z]:\//i.test(key) ? key.toLowerCase() : key
+  }
+  function pathLink(p, label, ctx, explicit) {
     p = localPath(p)
-    if (!ctx || !p || !inRoot(p, ctx.root)) return null
-    if (ctx.paths.indexOf(p) < 0) ctx.paths.push(p)
+    if (!ctx || !ctx.root || !p || (!explicit && !/[\\/]/.test(p)) || !inRoot(p, ctx.root)) return null
+    var key = resultPathKey(p, ctx.root), previous = ctx.paths.find(function (other) { return resultPathKey(other, ctx.root) === key })
+    if (previous) p = previous; else ctx.paths.push(p)
     return '<button class="file-link" ' + (videoPath(p) ? 'data-open-video' : 'data-result-path') + '="' + esc(p) + '">' + esc(label || p) + '</button>'
   }
   function inline(s, ctx) {
     var codes = []
     function token(h) { codes.push(h); return '\u0001' + (codes.length - 1) + '\u0002' }
     s = String(s).replace(/\[([^\]]+)\]\((<[^>\n]+>|[^)\n]+)\)/g, function (all, label, p) {
-      var link = pathLink(p, label, ctx)
+      var link = pathLink(p, label, ctx, true)
       return link ? token(link) : all
     })
     s = s.replace(/`([^`]+)`/g, function (_, c) { return token(pathLink(c, c, ctx) || '<code>' + esc(c) + '</code>') })
     // Quoted/Markdown paths support spaces; plain URLs and commands stay text.
-    s = s.replace(/(^|[\s（(])((?:\/?[a-z]:[\\/]|\.?[\w\u3400-\u9fff-]+[\\/])[^\s<>"'`|，。；！？()]+)(?=$|[\s，。；！？)])/gi, function (all, prefix, p) {
+    s = s.replace(/(^|[\s（(])((?:\/?[a-z]:[\\/]|\.?[\w\u3400-\u9fff-]+[\\/])[^\s<>"'`|，。；！？()]+)(?=$|[\s，。；！？)])/gi, function (all, prefix, p, offset) {
+      var before = s.slice(0, offset + prefix.length), after = s.slice(offset + all.length)
+      if (/^\s+-{1,2}\S/.test(after) || (/\.(?:py|js|mjs|cjs|ps1|bat|cmd|sh|exe)$/i.test(p) && /^\s+\S/.test(after)) || /(?:^|\s)(?:node|python(?:\d+(?:\.\d+)*)?|pwsh|powershell|bash|sh|npm|npx|ffmpeg|ffprobe)\s+$/i.test(before)) return all
       var link = pathLink(p, p, ctx)
       return link ? prefix + token(link) : all
     })

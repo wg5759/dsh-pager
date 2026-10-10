@@ -24,6 +24,10 @@ import android.provider.Settings;
 import android.service.notification.StatusBarNotification;
 import android.util.Base64;
 import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.widget.FrameLayout;
 import android.webkit.CookieManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -75,6 +79,11 @@ public class MainActivity extends Activity {
     /** A share that arrived before the page was ready. */
     String pendingShare;
     volatile boolean updating;
+    View fullscreenView;
+    WebChromeClient.CustomViewCallback fullscreenCallback;
+    int fullscreenSystemUi;
+    int fullscreenOrientation;
+    boolean wasFullscreen;
 
     /** The configured server origin, e.g. https://dsh.example.com:8443 — or "" before setup. */
     static String server(Context c) {
@@ -163,6 +172,16 @@ public class MainActivity extends Activity {
 
         web.setWebChromeClient(new WebChromeClient() {
             @Override
+            public void onShowCustomView(View view, CustomViewCallback callback) {
+                showFullscreen(view, callback);
+            }
+
+            @Override
+            public void onHideCustomView() {
+                hideFullscreen();
+            }
+
+            @Override
             public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams p) {
                 if (fileCb != null) fileCb.onReceiveValue(null);
                 fileCb = cb;
@@ -196,6 +215,48 @@ public class MainActivity extends Activity {
             web.loadUrl(session == null ? home() : home() + "#" + Uri.encode(session)); // the app opens a #session deep link on boot
         }
         handleShare(getIntent());
+    }
+
+    // Keep the original WebView attached: Chromium moves the same web contents
+    // into its custom view, so there is no new player, URL load or seek.
+    @SuppressWarnings("deprecation")
+    void showFullscreen(View view, WebChromeClient.CustomViewCallback callback) {
+        if (fullscreenView != null) {
+            callback.onCustomViewHidden();
+            return;
+        }
+        fullscreenView = view;
+        fullscreenCallback = callback;
+        fullscreenSystemUi = getWindow().getDecorView().getSystemUiVisibility();
+        fullscreenOrientation = getRequestedOrientation();
+        wasFullscreen = (getWindow().getAttributes().flags & WindowManager.LayoutParams.FLAG_FULLSCREEN) != 0;
+        view.setBackgroundColor(Color.BLACK);
+        getWindow().addContentView(view, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().getDecorView().setSystemUiVisibility(fullscreenSystemUi
+                | View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        // Respect the device's rotation policy; the manifest already handles
+        // orientation/size changes without recreating this Activity or WebView.
+    }
+
+    @SuppressWarnings("deprecation")
+    void hideFullscreen() {
+        if (fullscreenView == null) return;
+        View view = fullscreenView;
+        fullscreenView = null;
+        fullscreenCallback = null;
+        if (view.getParent() instanceof ViewGroup) ((ViewGroup) view.getParent()).removeView(view);
+        if (!wasFullscreen) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().getDecorView().setSystemUiVisibility(fullscreenSystemUi);
+        if (getRequestedOrientation() != fullscreenOrientation) setRequestedOrientation(fullscreenOrientation);
+    }
+
+    void exitFullscreen() {
+        WebChromeClient.CustomViewCallback callback = fullscreenCallback;
+        hideFullscreen();
+        if (callback != null) callback.onCustomViewHidden();
     }
 
     // ------------------------------------------------------------------ routing
@@ -474,7 +535,11 @@ public class MainActivity extends Activity {
                     if (b64 != null) imgs.put(new JSONObject().put("name", "shared-" + (k + 1) + ".jpg").put("type", "image/jpeg").put("b64", b64));
                 }
                 String p = new JSONObject().put("text", text == null ? "" : text).put("subject", subject == null ? "" : subject).put("images", imgs).toString();
-                runOnUiThread(() -> deliverShare(p));
+                boolean hasShare = (text != null && !text.isEmpty()) || (subject != null && !subject.isEmpty()) || imgs.length() > 0;
+                runOnUiThread(() -> {
+                    if (hasShare) exitFullscreen();
+                    deliverShare(p);
+                });
             } catch (Exception e) {
                 Log.w("DSHShare", "share failed: " + e);
             }
@@ -526,6 +591,7 @@ public class MainActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         String s = intent.getStringExtra("session");
+        if (s != null && !s.isEmpty()) exitFullscreen();
         if (s != null) web.evaluateJavascript("window.dshOpen&&window.dshOpen(" + JSONObject.quote(s) + ")", null);
         handleShare(intent);
     }
@@ -565,6 +631,10 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
+        if (fullscreenView != null) {
+            exitFullscreen();
+            return;
+        }
         if (web.canGoBack()) web.goBack();
         else moveTaskToBack(true); // like a native app: keep state, just leave
     }
@@ -582,5 +652,11 @@ public class MainActivity extends Activity {
         NotifyService.appVisible = false;
         CookieManager.getInstance().flush();
         if (!server(this).isEmpty()) saveCookie();
+    }
+
+    @Override
+    protected void onDestroy() {
+        exitFullscreen();
+        super.onDestroy();
     }
 }

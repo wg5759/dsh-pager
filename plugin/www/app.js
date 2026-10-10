@@ -568,7 +568,7 @@
   function baseName(p) { var s = String(p || '').replace(/[\\/]+$/, ''); return s.slice(Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\')) + 1) || s }
   function dirName(rel) { var i = String(rel || '').lastIndexOf('/'); return i < 0 ? '' : rel.slice(0, i) }
   function rawUrl(s, rel) { return '/m/api/raw?s=' + enc(s) + '&path=' + enc(rel) }
-  var fullVideo = null
+  var fullVideo = null, nativeVideo = null
   function videoHtml(s, p, cls, messageSeq) {
     return '<div class="video-box" data-video-box><video class="' + cls + '" aria-label="播放 ' + esc(baseName(p)) + '" data-artifact="' + esc(p) + '" data-session="' + esc(s) + '"' + (messageSeq == null ? '' : ' data-message-seq="' + esc(messageSeq) + '"') + ' data-quality="preview" controls playsinline preload="none" src="' + esc(rawUrl(s, p)) + '"></video>' +
       '<div class="video-options"><span class="video-note">流畅预览</span><button data-video-retry hidden>重试预览</button><button data-video-quality>切换原画</button><button data-video-fullscreen>全屏</button></div></div>'
@@ -587,8 +587,8 @@
       if (entry.redraw && c && S.cur === c.id) renderMsgs(c, false, true)
       v._fullscreen = false
     })
-    // The installed Android shell has no native fullscreen host; the same
-    // player fills its viewport. Browsers can additionally hide their chrome.
+    // Keep the installed-app button usable in older shells without native
+    // fullscreen support; browsers can additionally hide their chrome.
     if (!/DSHApp\//.test(navigator.userAgent) && document.fullscreenEnabled !== false && typeof box.requestFullscreen === 'function') {
       try {
         Promise.resolve(box.requestFullscreen()).then(function () {
@@ -599,6 +599,19 @@
     }
   }
   document.addEventListener('fullscreenchange', function () {
+    var current = document.fullscreenElement
+    if (nativeVideo && current !== nativeVideo.v) {
+      var entry = nativeVideo, c = S.chats.get(entry.v.dataset.session)
+      nativeVideo = null
+      // Retain even a paused zero-position player through the deferred repaint.
+      if (entry.redraw && c && S.cur === c.id) renderMsgs(c, false, true)
+      if (!fullVideo || fullVideo.v !== entry.v) entry.v._fullscreen = false
+    }
+    // The native controls enter fullscreen directly on <video>, bypassing our
+    // separate button and its CSS overlay. Never detach that live video either.
+    if (!nativeVideo && current && current.tagName === 'VIDEO' && current.dataset.artifact) {
+      nativeVideo = { v: current, redraw: false }; current._fullscreen = true
+    }
     if (!fullVideo) return
     if (document.fullscreenElement === fullVideo.box) fullVideo.native = true
     else if (fullVideo.native) closeFullscreenVideo()
@@ -1128,7 +1141,8 @@
     if (c.id !== S.cur) return
     // Detaching a fullscreen element exits native fullscreen and interrupts
     // WebView playback. Receive frames normally and paint once after exit.
-    if (fullVideo && fullVideo.v.dataset.session === c.id && fullVideo.v.getAttribute('data-message-seq') != null) { fullVideo.redraw = true; return }
+    var fullscreen = fullVideo || nativeVideo
+    if (fullscreen && fullscreen.v.dataset.session === c.id && fullscreen.v.getAttribute('data-message-seq') != null) { fullscreen.redraw = true; return }
     var stick = jump || (!keep && nearBottom())
     if (!c.loaded) {
       el.older.innerHTML = ''

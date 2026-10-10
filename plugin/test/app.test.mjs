@@ -1297,3 +1297,100 @@ test('fullscreen repeated exit intents wait for one asynchronous popstate', asyn
   tapVideoControl(s, box, '[data-video-fullscreen]')
   assert.equal(backRequests, 2, 'a later fullscreen entry gets its own close intent')
 })
+
+// Regression cases for the real app.js's native fullscreenchange seam.
+// These are DOM/event contract tests. They do not verify Android's icon or host.
+
+for (const pausedAtZero of [false, true]) test(`native controls fullscreen keeps the same connected message player (pausedAtZero=${pausedAtZero})`, async () => {
+  const { s, c, dom, v, box } = await previewChat(), history = fullscreenHistory(s, c)
+  s.navigator.userAgent = 'Android DSHApp/1.3.2+10302'
+  v.currentTime = pausedAtZero ? 0 : 12.3
+  v.paused = pausedAtZero
+  v.dataset.quality = 'original'
+  const source = v.src
+  let connected = true, detaches = 0
+  Object.defineProperty(v, 'isConnected', { configurable: true, get: () => connected, set(value) { connected = value; if (!value) detaches++ } })
+
+  // Native video controls make the video the fullscreen element, rather than
+  // clicking our separate [data-video-fullscreen] button or expanding its box.
+  s.document.fullscreenElement = v
+  s.dispatchDocument('fullscreenchange', { target: v })
+  assert.equal(history.length, 1, 'native fullscreen does not create a second frontend back level')
+  s.window.__dsh.onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 9, text: 'native fullscreen received frame' } })
+  s.window.__dsh.onFrame({ t: 'item', s: c.id, it: { k: 'end', seq: 10, reason: 'completed' } })
+  await rendered()
+
+  assert.ok(c.items.some(it => it.text === 'native fullscreen received frame'), 'stream state keeps receiving actual frames')
+  assert.equal(detaches, 0, 'message repaint must not detach a native fullscreen video even temporarily')
+  assert.equal(dom.slots[1], box, 'the fullscreen player box is kept in its existing message')
+  assert.equal(dom.videos()[1], v)
+  assert.equal(v.currentTime, pausedAtZero ? 0 : 12.3)
+  assert.equal(v.paused, pausedAtZero)
+  assert.equal(v.src, source)
+  assert.equal(v.playCalls, 0)
+  assert.doesNotMatch(s.els.get('msgs').innerHTML, /native fullscreen received frame/, 'paint waits for fullscreen exit')
+
+  // Android's native Back is expected to dismiss the host and cause this event.
+  // Exercising that native callback and actual hardware Back is a separate test.
+  s.document.fullscreenElement = null
+  s.dispatchDocument('fullscreenchange', { target: v })
+  await rendered()
+  assert.match(s.els.get('msgs').innerHTML, /native fullscreen received frame/)
+  assert.equal(dom.videos()[1], v, 'exit retains even a paused player at zero')
+  assert.equal(v.currentTime, pausedAtZero ? 0 : 12.3)
+  assert.equal(v.paused, pausedAtZero)
+  assert.equal(v.playCalls, 0)
+  assert.equal(history.length, 1, 'native exit leaves the current chat and its back level intact')
+  assert.equal(s.window.__dsh.S.cur, c.id)
+})
+
+test('installed custom fullscreen switching session never reuses another session video', async () => {
+  const { s, c, dom, v, box } = await previewChat(), states = fullscreenHistory(s, c)
+  s.history.go = delta => {
+    assert.ok(delta < 0)
+    states.splice(Math.max(1, states.length + delta))
+    s.history.state = states.at(-1)
+    s.dispatchWindow('popstate', { state: s.history.state })
+  }
+  s.navigator.userAgent = 'Android DSHApp/1.3.2+10302'
+  v.currentTime = 12.3; v.paused = false
+  tapVideoControl(s, box, '[data-video-fullscreen]')
+  const other = resultChat(s, 'other-results')
+  // resultChat populates a new state and selects it; restore the actual old
+  // selection so that dshOpen, rather than the fixture setup, performs the switch.
+  s.window.__dsh.S.cur = c.id
+  twoVideoTurns(s, other, s.window.__dsh.onFrame)
+  s.window.dshOpen(other.id)
+  await rendered()
+  assert.equal(s.window.__dsh.S.cur, other.id)
+  assert.equal(box.classList.contains('video-expanded'), false)
+  assert.equal(v._fullscreen, false)
+  assert.equal(s.history.state.od, undefined, 'fullscreen overlay is closed before the new chat is pushed')
+  assert.equal(dom.videos().length, 2)
+  assert.ok(dom.videos().every(movie => movie !== v && movie.dataset.session === other.id), 'same paths and message sequences cannot import the old session player')
+  assert.ok(dom.videos().every(movie => movie.currentTime === 0 && movie.playCalls === 0))
+})
+
+test('native fullscreen exit after session switch cannot repaint or import the previous video', async () => {
+  const { s, c, dom, v } = await previewChat()
+  s.navigator.userAgent = 'Android DSHApp/1.3.2+10302'
+  const other = resultChat(s, 'other-results')
+  s.window.__dsh.S.cur = c.id
+  twoVideoTurns(s, other, s.window.__dsh.onFrame)
+  v.currentTime = 12.3; v.paused = false
+  s.document.fullscreenElement = v
+  s.dispatchDocument('fullscreenchange', { target: v })
+  s.window.__dsh.onFrame({ t: 'item', s: c.id, it: { k: 'a', seq: 9, text: 'old fullscreen pending result' } })
+  await rendered()
+  s.window.dshOpen(other.id)
+  await rendered()
+  // The native host's exit event may arrive after the session navigation.
+  s.document.fullscreenElement = null
+  s.dispatchDocument('fullscreenchange', { target: v })
+  await rendered()
+  assert.equal(s.window.__dsh.S.cur, other.id)
+  assert.equal(v._fullscreen, false, 'the old native fullscreen state is released')
+  assert.ok(dom.videos().every(movie => movie !== v && movie.dataset.session === other.id))
+  assert.ok(dom.videos().every(movie => movie.currentTime === 0 && movie.playCalls === 0))
+  assert.doesNotMatch(s.els.get('msgs').innerHTML, /old fullscreen pending result/, 'late exit does not paint the previous chat into the new one')
+})

@@ -3,7 +3,7 @@
 **DeepSeek Harness 的"寻呼机"**：一个 DSH 插件，加一个约 53 KB 的安卓 App；iPhone 把网页添加到主屏幕即可。
 人不在电脑前，也能看进度、看改了哪些文件、发指令，并在通知栏里直接批准或拒绝。**默认仅同步 DSH 自己的项目和对话**；电脑上的 Claude Code / Codex 接入为显式开启的可选功能（见 [docs/claude-code-codex.md](docs/claude-code-codex.md)）。
 
-> 非官方社区项目，与 DeepSeek 没有关联。· [English](#english)
+> 非官方社区项目，与 DeepSeek 没有关联。｜ [English](#english)
 
 `MIT` · `Android 10+` · `iOS / iPadOS 16.4+（主屏幕 Web App）` · `Windows & macOS 宿主` · `DeepSeek Harness 0.2.1 / 0.1.1-rc.2` · `Node.js 22+` · `dsh-plugin`
 
